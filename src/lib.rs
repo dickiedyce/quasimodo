@@ -225,6 +225,8 @@ pub struct CliArgs {
     pub system_prompt: Option<String>,
     pub history_file: Option<String>,
     pub quality_retry: bool,
+    pub teach_description: Option<String>,
+    pub teach_command: Option<String>,
 }
 
 impl CliArgs {
@@ -241,6 +243,8 @@ impl CliArgs {
         let mut system_prompt: Option<String> = None;
         let mut history_file: Option<String> = None;
         let mut quality_retry = true;
+        let mut teach_description: Option<String> = None;
+        let mut teach_command: Option<String> = None;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -294,13 +298,20 @@ impl CliArgs {
                 "--no-quality-retry" => {
                     quality_retry = false;
                 }
+                "--teach" => {
+                    teach_description =
+                        Some(args.next().ok_or("--teach requires a description")?);
+                }
+                "--command" => {
+                    teach_command = Some(args.next().ok_or("--command requires a value")?);
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
 
         let prompt = if let Some(prompt) = prompt {
             prompt
-        } else if stdin {
+        } else if stdin || teach_description.is_some() {
             String::new()
         } else {
             return Err("--prompt is required".to_string());
@@ -319,6 +330,8 @@ impl CliArgs {
             system_prompt,
             history_file,
             quality_retry,
+            teach_description,
+            teach_command,
         })
     }
 }
@@ -348,6 +361,23 @@ fn save_history(path: &str, messages: &[ChatMessage]) -> Result<(), ProviderErro
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
+    // --teach mode: store a user-provided example in the bank; no LLM call needed.
+    if let Some(ref description) = args.teach_description {
+        let command = args
+            .teach_command
+            .as_deref()
+            .ok_or_else(|| ProviderError::InvalidConfig("--teach requires --command".to_string()))?;
+        let bank_path = args
+            .bank_path
+            .as_deref()
+            .ok_or_else(|| ProviderError::InvalidConfig("--teach requires --bank".to_string()))?;
+        let bank = Bank::open(bank_path)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        bank.teach(description, command)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        return Ok(format!("taught: {description} -> {command}"));
+    }
+
     // Sensitive filter: never send credential-containing prompts to the model.
     if is_sensitive(&args.prompt) {
         return Err(ProviderError::InvalidConfig(
@@ -882,6 +912,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -903,6 +935,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -1052,6 +1086,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let adapter = CyclingAdapter::new();
@@ -1074,6 +1110,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -1109,6 +1147,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let result = run(&args, &MultilineExplainAdapter).unwrap();
@@ -1157,6 +1197,8 @@ mod tests {
             system_prompt: None,
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
@@ -1235,6 +1277,8 @@ This should return the address.
             system_prompt: Some("You are concise".to_string()),
             history_file: None,
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1264,6 +1308,8 @@ This should return the address.
             system_prompt: Some("You are concise".to_string()),
             history_file: Some(path.to_string_lossy().to_string()),
             quality_retry: true,
+            teach_description: None,
+            teach_command: None,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1273,6 +1319,53 @@ This should return the address.
         assert!(saved.contains("\"role\": \"user\""));
         assert!(saved.contains("\"hello history\""));
         assert!(saved.contains("\"role\": \"assistant\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn teach_via_cli_stores_example_and_returns_confirmation() {
+        use crate::bank::Bank;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-teach-{now}.db"));
+        let db_path = path.to_string_lossy().to_string();
+
+        // Initialise schema.
+        let _ = Bank::open(&db_path).unwrap();
+
+        let args = CliArgs::parse(
+            vec![
+                "--teach".to_string(),
+                "date 90 days ago".to_string(),
+                "--command".to_string(),
+                "date -v -90d '+%Y-%m-%d'".to_string(),
+                "--bank".to_string(),
+                db_path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(args.teach_description.as_deref(), Some("date 90 days ago"));
+        assert_eq!(
+            args.teach_command.as_deref(),
+            Some("date -v -90d '+%Y-%m-%d'")
+        );
+
+        let result = run(&args, &EchoAdapter).unwrap();
+        assert!(result.contains("taught"), "expected 'taught' in: {result}");
+
+        let bank = Bank::open(&db_path).unwrap();
+        let hits = bank.search("date 90 days ago", 3).unwrap();
+        assert!(
+            hits.iter().any(|e| e.command.contains("date -v")),
+            "taught example not found in search results"
+        );
 
         let _ = std::fs::remove_file(path);
     }

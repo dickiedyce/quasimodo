@@ -28,6 +28,8 @@ impl Bank {
     fn init_schema(&self) -> SqlResult<()> {
         self.conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entries
+             USING fts5(description, command, tokenize='porter ascii');
+             CREATE VIRTUAL TABLE IF NOT EXISTS user_examples
              USING fts5(description, command, tokenize='porter ascii');",
         )
     }
@@ -47,20 +49,58 @@ impl Bank {
         Ok(())
     }
 
+    /// Teach the bank a new user-curated prompt→command example.
+    /// User examples are stored separately from TLDR data and are never
+    /// overwritten by `build-bank`. They are prioritised over TLDR entries
+    /// in retrieval results.
+    pub fn teach(&self, description: &str, command: &str) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO user_examples(description, command) VALUES (?1, ?2)",
+            params![description, command],
+        )?;
+        Ok(())
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> SqlResult<Vec<BankEntry>> {
+        // User examples come first, then TLDR entries, total capped at limit.
+        let mut results: Vec<BankEntry> = Vec::new();
+
         let mut stmt = self.conn.prepare(
-            "SELECT description, command FROM entries
-             WHERE entries MATCH ?1
+            "SELECT description, command FROM user_examples
+             WHERE user_examples MATCH ?1
              ORDER BY rank
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit as i64], |row| {
+        let user_rows = stmt.query_map(params![query, limit as i64], |row| {
             Ok(BankEntry {
                 description: row.get(0)?,
                 command: row.get(1)?,
             })
         })?;
-        rows.collect()
+        for row in user_rows {
+            results.push(row?);
+        }
+
+        if results.len() < limit {
+            let remaining = (limit - results.len()) as i64;
+            let mut stmt2 = self.conn.prepare(
+                "SELECT description, command FROM entries
+                 WHERE entries MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )?;
+            let tldr_rows = stmt2.query_map(params![query, remaining], |row| {
+                Ok(BankEntry {
+                    description: row.get(0)?,
+                    command: row.get(1)?,
+                })
+            })?;
+            for row in tldr_rows {
+                results.push(row?);
+            }
+        }
+
+        Ok(results)
     }
 
     pub fn len(&self) -> SqlResult<usize> {
@@ -82,5 +122,48 @@ impl<'a> Retriever<'a> {
 
     pub fn retrieve(&self, query: &str) -> SqlResult<Vec<BankEntry>> {
         self.bank.search(query, self.limit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teach_stores_user_example() {
+        let bank = Bank::open_in_memory().unwrap();
+        bank.teach("what is the date 90 days ago", "date -v -90d '+%Y-%m-%d'").unwrap();
+        let results = bank.search("90 days ago", 5).unwrap();
+        assert!(!results.is_empty(), "should find taught example");
+        assert_eq!(results[0].command, "date -v -90d '+%Y-%m-%d'");
+    }
+
+    #[test]
+    fn teach_result_appears_before_tldr_entries() {
+        let bank = Bank::open_in_memory().unwrap();
+        // Add a TLDR-style entry first
+        bank.insert(&BankEntry {
+            description: "date 90 days ago linux".into(),
+            command: "date -d '-90 days' '+%Y-%m-%d'".into(),
+        }).unwrap();
+        // Then teach the correct macOS version
+        bank.teach("what is the date 90 days ago", "date -v -90d '+%Y-%m-%d'").unwrap();
+        let results = bank.search("90 days ago", 5).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].command, "date -v -90d '+%Y-%m-%d'",
+            "user example should appear first");
+    }
+
+    #[test]
+    fn teach_survives_bank_rebuild_if_separate_path() {
+        // Verifies that user_examples table exists independently of entries
+        let bank = Bank::open_in_memory().unwrap();
+        bank.teach("show date", "date").unwrap();
+        // Simulate a rebuild clearing only entries
+        bank.conn.execute_batch(
+            "DELETE FROM entries;"
+        ).unwrap();
+        let results = bank.search("show date", 5).unwrap();
+        assert!(!results.is_empty(), "user examples should survive entries rebuild");
     }
 }
