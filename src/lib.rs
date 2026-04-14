@@ -123,6 +123,7 @@ pub struct CliArgs {
     pub explain: bool,
     pub samples: usize,
     pub temperature: f32,
+    pub stdin: bool,
 }
 
 impl CliArgs {
@@ -135,6 +136,7 @@ impl CliArgs {
         let mut explain = false;
         let mut samples: usize = 1;
         let mut temperature: f32 = 0.0;
+        let mut stdin = false;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -176,19 +178,31 @@ impl CliArgs {
                         .parse()
                         .map_err(|_| "--temperature must be a float")?;
                 }
+                "--stdin" => {
+                    stdin = true;
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
 
+        let prompt = if let Some(prompt) = prompt {
+            prompt
+        } else if stdin {
+            String::new()
+        } else {
+            return Err("--prompt is required".to_string());
+        };
+
         Ok(Self {
             model,
             endpoint,
-            prompt: prompt.ok_or("--prompt is required")?,
+            prompt,
             bank_path,
             notfound,
             explain,
             samples,
             temperature,
+            stdin,
         })
     }
 }
@@ -415,6 +429,7 @@ mod tests {
             explain: false,
             samples: 1,
             temperature: 0.0,
+            stdin: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -432,6 +447,7 @@ mod tests {
             explain: false,
             samples: 1,
             temperature: 0.0,
+            stdin: false,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -507,6 +523,20 @@ mod tests {
         assert_eq!(args.temperature, 0.0);
     }
 
+    #[test]
+    fn cli_args_parse_stdin_mode_without_prompt() {
+        let raw = ["--stdin"].iter().map(|s| s.to_string());
+        let args = CliArgs::parse(raw).unwrap();
+        assert!(args.stdin);
+        assert_eq!(args.prompt, "");
+    }
+
+    #[test]
+    fn cli_args_still_requires_prompt_without_stdin() {
+        let raw = ["--model", "llama3.2"].iter().map(|s| s.to_string());
+        assert!(CliArgs::parse(raw).is_err());
+    }
+
     struct CyclingAdapter {
         idx: std::cell::Cell<usize>,
     }
@@ -549,6 +579,7 @@ mod tests {
             explain: false,
             samples: 3,
             temperature: 0.3,
+            stdin: false,
         };
 
         let adapter = CyclingAdapter::new();
@@ -567,6 +598,7 @@ mod tests {
             explain: true,
             samples: 1,
             temperature: 0.0,
+            stdin: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
