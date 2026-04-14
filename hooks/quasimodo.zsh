@@ -3,18 +3,26 @@
 # Usage:
 #   export QUASIMODO_BIN="$HOME/.local/bin/quasimodo"
 #   export QUASIMODO_BANK="$HOME/.local/share/quasimodo/tldr_bank.db"
+#   export QUASIMODO_SYSTEM="Return only shell commands"
+#   export QUASIMODO_HISTORY="$HOME/.local/share/quasimodo/session.json"
 #   source /path/to/quasimodo/hooks/quasimodo.zsh
 
 : "${QUASIMODO_BIN:=quasimodo}"
 : "${QUASIMODO_BANK:=tldr_bank.db}"
+: "${QUASIMODO_SYSTEM:=}"
+: "${QUASIMODO_HISTORY:=}"
 
 _quasimodo_ctrl_g() {
   emulate -L zsh
   local input="$BUFFER"
   [[ -z "$input" ]] && return
 
+  local -a extra
+  [[ -n "$QUASIMODO_SYSTEM" ]] && extra+=(--system "$QUASIMODO_SYSTEM")
+  [[ -n "$QUASIMODO_HISTORY" ]] && extra+=(--history-file "$QUASIMODO_HISTORY")
+
   local output
-  output="$($QUASIMODO_BIN --prompt "$input" --bank "$QUASIMODO_BANK" 2>/dev/null)" || return
+  output="$($QUASIMODO_BIN --prompt "$input" --bank "$QUASIMODO_BANK" "${extra[@]}" 2>/dev/null)" || return
   [[ -z "$output" ]] && return
 
   BUFFER="$output"

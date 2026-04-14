@@ -47,6 +47,10 @@ echo "find files changed in the last hour" | cargo run -- --stdin --bank ./tldr_
 
 # Optional: majority-vote consistency mode
 cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank ./tldr_bank.db
+
+# Multi-turn with persisted history
+cargo run -- --prompt "show largest files" --history-file ./session.json --system "Return only shell commands"
+cargo run -- --prompt "now limit to current folder" --history-file ./session.json --system "Return only shell commands"
 ```
 
 ## zsh Hooks

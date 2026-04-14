@@ -6,13 +6,30 @@ pub mod prompt;
 use bank::{Bank, Retriever};
 use filter::{command_exists, command_name, is_sensitive};
 use prompt::{PromptBuilder, strip_markdown};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fs;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerateRequest {
     pub model: String,
     pub prompt: String,
     pub temperature: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatRequest {
+    pub model: String,
+    pub prompt: String,
+    pub temperature: f32,
+    pub system_prompt: Option<String>,
+    pub history: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +48,30 @@ pub enum ProviderError {
 pub trait ProviderAdapter {
     fn is_local_available(&self) -> Result<bool, ProviderError>;
     fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse, ProviderError>;
+
+    fn generate_chat(&self, req: &ChatRequest) -> Result<GenerateResponse, ProviderError> {
+        let mut flattened = String::new();
+
+        if let Some(system) = &req.system_prompt {
+            flattened.push_str(system);
+            flattened.push_str("\n\n");
+        }
+
+        for msg in &req.history {
+            flattened.push_str(&msg.role);
+            flattened.push_str(": ");
+            flattened.push_str(&msg.content);
+            flattened.push('\n');
+        }
+
+        flattened.push_str(&req.prompt);
+
+        self.generate(&GenerateRequest {
+            model: req.model.clone(),
+            prompt: flattened,
+            temperature: req.temperature,
+        })
+    }
 }
 
 pub struct OllamaAdapter {
@@ -77,6 +118,19 @@ impl ProviderAdapter for OllamaAdapter {
 
         Self::parse_generate_response(&response_text)
     }
+
+    fn generate_chat(&self, req: &ChatRequest) -> Result<GenerateResponse, ProviderError> {
+        let url = self.chat_url();
+        let payload = Self::build_chat_payload(req);
+        let response_text = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(&payload)
+            .map_err(|err| ProviderError::Transport(err.to_string()))?
+            .into_string()
+            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+
+        Self::parse_chat_response(&response_text)
+    }
 }
 
 impl OllamaAdapter {
@@ -86,6 +140,10 @@ impl OllamaAdapter {
 
     fn generate_url(&self) -> String {
         format!("{}/api/generate", self.endpoint.trim_end_matches('/'))
+    }
+
+    fn chat_url(&self) -> String {
+        format!("{}/api/chat", self.endpoint.trim_end_matches('/'))
     }
 
     fn build_generate_payload(req: &GenerateRequest) -> String {
@@ -110,6 +168,46 @@ impl OllamaAdapter {
             text: text.to_string(),
         })
     }
+
+    fn build_chat_payload(req: &ChatRequest) -> String {
+        let mut messages = Vec::new();
+
+        if let Some(system) = &req.system_prompt {
+            messages.push(json!({"role": "system", "content": system}));
+        }
+
+        for msg in &req.history {
+            messages.push(json!({"role": msg.role, "content": msg.content}));
+        }
+
+        messages.push(json!({"role": "user", "content": req.prompt}));
+
+        json!({
+            "model": req.model,
+            "messages": messages,
+            "stream": false,
+            "options": {
+                "temperature": req.temperature
+            }
+        })
+        .to_string()
+    }
+
+    fn parse_chat_response(raw: &str) -> Result<GenerateResponse, ProviderError> {
+        let parsed: Value =
+            serde_json::from_str(raw).map_err(|err| ProviderError::Parse(err.to_string()))?;
+
+        let text = parsed
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .or_else(|| parsed.get("response").and_then(Value::as_str))
+            .ok_or_else(|| ProviderError::Parse("missing message content".to_string()))?;
+
+        Ok(GenerateResponse {
+            text: text.to_string(),
+        })
+    }
 }
 
 // --- CLI ---
@@ -124,6 +222,8 @@ pub struct CliArgs {
     pub samples: usize,
     pub temperature: f32,
     pub stdin: bool,
+    pub system_prompt: Option<String>,
+    pub history_file: Option<String>,
 }
 
 impl CliArgs {
@@ -137,6 +237,8 @@ impl CliArgs {
         let mut samples: usize = 1;
         let mut temperature: f32 = 0.0;
         let mut stdin = false;
+        let mut system_prompt: Option<String> = None;
+        let mut history_file: Option<String> = None;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -181,6 +283,12 @@ impl CliArgs {
                 "--stdin" => {
                     stdin = true;
                 }
+                "--system" => {
+                    system_prompt = Some(args.next().ok_or("--system requires a value")?);
+                }
+                "--history-file" => {
+                    history_file = Some(args.next().ok_or("--history-file requires a path")?);
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -203,8 +311,34 @@ impl CliArgs {
             samples,
             temperature,
             stdin,
+            system_prompt,
+            history_file,
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ConversationFile {
+    messages: Vec<ChatMessage>,
+}
+
+fn load_history(path: &str) -> Vec<ChatMessage> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    serde_json::from_str::<ConversationFile>(&raw)
+        .map(|f| f.messages)
+        .unwrap_or_default()
+}
+
+fn save_history(path: &str, messages: &[ChatMessage]) -> Result<(), ProviderError> {
+    let doc = ConversationFile {
+        messages: messages.to_vec(),
+    };
+    let raw = serde_json::to_string_pretty(&doc)
+        .map_err(|err| ProviderError::Parse(err.to_string()))?;
+    fs::write(path, raw).map_err(|err| ProviderError::Transport(err.to_string()))
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
@@ -230,7 +364,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         });
     }
 
-    let system = if let Some(ref path) = args.bank_path {
+    let bank_system = if let Some(ref path) = args.bank_path {
         Bank::open(path)
             .ok()
             .and_then(|bank| {
@@ -243,21 +377,48 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         None
     };
 
-    let full_prompt = match system {
-        Some(ref sys) => format!("{sys}\nQ: {}\nA:", args.prompt),
-        None => args.prompt.clone(),
+    let merged_system = match (&args.system_prompt, &bank_system) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (Some(a), None) => Some(a.clone()),
+        (None, Some(b)) => Some(b.clone()),
+        (None, None) => None,
     };
+
+    let use_chat = merged_system.is_some() || args.history_file.is_some();
+
+    let history = args
+        .history_file
+        .as_deref()
+        .map(load_history)
+        .unwrap_or_default();
 
     let final_prompt = if args.explain {
-        format!("Explain briefly what failed and suggest a concrete fix. Input: {full_prompt}")
+        format!(
+            "Explain briefly what failed and suggest a concrete fix. Input: {}",
+            args.prompt
+        )
     } else {
-        full_prompt
+        args.prompt.clone()
     };
 
-    let req = GenerateRequest {
-        model: args.model.clone(),
-        prompt: final_prompt,
-        temperature: args.temperature,
+    let generate_once = |prompt_text: &str| -> Result<String, ProviderError> {
+        if use_chat {
+            let req = ChatRequest {
+                model: args.model.clone(),
+                prompt: prompt_text.to_string(),
+                temperature: args.temperature,
+                system_prompt: merged_system.clone(),
+                history: history.clone(),
+            };
+            adapter.generate_chat(&req).map(|r| strip_markdown(&r.text))
+        } else {
+            let req = GenerateRequest {
+                model: args.model.clone(),
+                prompt: prompt_text.to_string(),
+                temperature: args.temperature,
+            };
+            adapter.generate(&req).map(|r| strip_markdown(&r.text))
+        }
     };
 
     let raw = if args.samples > 1 && !args.explain {
@@ -267,7 +428,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         let mut first: Option<String> = None;
 
         for _ in 0..args.samples {
-            let sample = adapter.generate(&req).map(|r| strip_markdown(&r.text))?;
+            let sample = generate_once(&final_prompt)?;
             if first.is_none() {
                 first = Some(sample.clone());
             }
@@ -281,7 +442,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
             .or(first)
             .unwrap_or_default()
     } else {
-        adapter.generate(&req).map(|r| strip_markdown(&r.text))?
+        generate_once(&final_prompt)?
     };
 
     if args.explain {
@@ -294,12 +455,20 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
             "{} (previous answer '{}' was not a valid command, try again)",
             args.prompt, raw
         );
-        let retry_req = GenerateRequest {
-            model: args.model.clone(),
-            prompt: retry_prompt,
-            temperature: args.temperature,
-        };
-        return adapter.generate(&retry_req).map(|r| strip_markdown(&r.text));
+        return generate_once(&retry_prompt);
+    }
+
+    if let Some(path) = &args.history_file {
+        let mut next_history = history;
+        next_history.push(ChatMessage {
+            role: "user".to_string(),
+            content: args.prompt.clone(),
+        });
+        next_history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: raw.clone(),
+        });
+        save_history(path, &next_history)?;
     }
 
     Ok(raw)
@@ -363,6 +532,34 @@ mod tests {
 
         let parsed = OllamaAdapter::parse_generate_response(raw).unwrap();
         assert_eq!(parsed.text, "hi there");
+    }
+
+    #[test]
+    fn builds_chat_payload_with_system_and_history() {
+        let req = ChatRequest {
+            model: "llama3.2".to_string(),
+            prompt: "next question".to_string(),
+            temperature: 0.2,
+            system_prompt: Some("You are concise".to_string()),
+            history: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "first question".to_string(),
+            }],
+        };
+
+        let payload = OllamaAdapter::build_chat_payload(&req);
+        assert!(payload.contains("\"messages\""));
+        assert!(payload.contains("\"role\":\"system\""));
+        assert!(payload.contains("\"You are concise\""));
+        assert!(payload.contains("\"first question\""));
+        assert!(payload.contains("\"next question\""));
+    }
+
+    #[test]
+    fn parses_chat_response_text() {
+        let raw = r#"{"message":{"role":"assistant","content":"use git status"}}"#;
+        let parsed = OllamaAdapter::parse_chat_response(raw).unwrap();
+        assert_eq!(parsed.text, "use git status");
     }
 
     // --- mock adapters for contract tests ---
@@ -430,6 +627,8 @@ mod tests {
             samples: 1,
             temperature: 0.0,
             stdin: false,
+            system_prompt: None,
+            history_file: None,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -448,6 +647,8 @@ mod tests {
             samples: 1,
             temperature: 0.0,
             stdin: false,
+            system_prompt: None,
+            history_file: None,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -460,6 +661,8 @@ mod tests {
             "--prompt", "hello world",
             "--endpoint", "http://localhost:11434",
             "--bank", "./tldr_bank.db",
+            "--system", "You are terse",
+            "--history-file", "./session.json",
         ]
         .iter()
         .map(|s| s.to_string());
@@ -469,6 +672,8 @@ mod tests {
         assert_eq!(args.prompt, "hello world");
         assert_eq!(args.endpoint, "http://localhost:11434");
         assert_eq!(args.bank_path.as_deref(), Some("./tldr_bank.db"));
+        assert_eq!(args.system_prompt.as_deref(), Some("You are terse"));
+        assert_eq!(args.history_file.as_deref(), Some("./session.json"));
     }
 
     #[test]
@@ -580,6 +785,8 @@ mod tests {
             samples: 3,
             temperature: 0.3,
             stdin: false,
+            system_prompt: None,
+            history_file: None,
         };
 
         let adapter = CyclingAdapter::new();
@@ -599,10 +806,85 @@ mod tests {
             samples: 1,
             temperature: 0.0,
             stdin: false,
+            system_prompt: None,
+            history_file: None,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
         assert!(result.starts_with("echo "));
+    }
+
+    struct ChatOnlyAdapter;
+
+    impl ProviderAdapter for ChatOnlyAdapter {
+        fn is_local_available(&self) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse, ProviderError> {
+            Err(ProviderError::Unavailable)
+        }
+
+        fn generate_chat(&self, req: &ChatRequest) -> Result<GenerateResponse, ProviderError> {
+            Ok(GenerateResponse {
+                text: format!("echo {}", req.prompt),
+            })
+        }
+    }
+
+    #[test]
+    fn run_uses_chat_path_when_system_prompt_is_set() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "hello".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: false,
+            samples: 1,
+            temperature: 0.0,
+            stdin: false,
+            system_prompt: Some("You are concise".to_string()),
+            history_file: None,
+        };
+
+        let out = run(&args, &ChatOnlyAdapter).unwrap();
+        assert_eq!(out, "echo hello");
+    }
+
+    #[test]
+    fn run_persists_history_file() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-history-{now}.json"));
+
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "hello history".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: false,
+            samples: 1,
+            temperature: 0.0,
+            stdin: false,
+            system_prompt: Some("You are concise".to_string()),
+            history_file: Some(path.to_string_lossy().to_string()),
+        };
+
+        let out = run(&args, &ChatOnlyAdapter).unwrap();
+        assert_eq!(out, "echo hello history");
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("\"role\": \"user\""));
+        assert!(saved.contains("\"hello history\""));
+        assert!(saved.contains("\"role\": \"assistant\""));
+
+        let _ = std::fs::remove_file(path);
     }
 }
 
