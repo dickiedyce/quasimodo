@@ -1,3 +1,8 @@
+pub mod bank;
+pub mod prompt;
+
+use bank::{Bank, Retriever};
+use prompt::{PromptBuilder, strip_markdown};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +113,7 @@ pub struct CliArgs {
     pub model: String,
     pub endpoint: String,
     pub prompt: String,
+    pub bank_path: Option<String>,
 }
 
 impl CliArgs {
@@ -115,6 +121,7 @@ impl CliArgs {
         let mut model = "llama3.2".to_string();
         let mut endpoint = "http://localhost:11434".to_string();
         let mut prompt: Option<String> = None;
+        let mut bank_path: Option<String> = None;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -127,6 +134,9 @@ impl CliArgs {
                 "--endpoint" => {
                     endpoint = args.next().ok_or("--endpoint requires a value")?;
                 }
+                "--bank" => {
+                    bank_path = Some(args.next().ok_or("--bank requires a path")?);
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -135,16 +145,36 @@ impl CliArgs {
             model,
             endpoint,
             prompt: prompt.ok_or("--prompt is required")?,
+            bank_path,
         })
     }
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
+    let system = if let Some(ref path) = args.bank_path {
+        Bank::open(path)
+            .ok()
+            .and_then(|bank| {
+                let retriever = Retriever::new(&bank, 8);
+                retriever.retrieve(&args.prompt).ok().map(|examples| {
+                    PromptBuilder::new(examples).system_prompt()
+                })
+            })
+    } else {
+        None
+    };
+
+    let full_prompt = match system {
+        Some(ref sys) => format!("{sys}\nQ: {}\nA:", args.prompt),
+        None => args.prompt.clone(),
+    };
+
     let req = GenerateRequest {
         model: args.model.clone(),
-        prompt: args.prompt.clone(),
+        prompt: full_prompt,
     };
-    adapter.generate(&req).map(|r| r.text)
+
+    adapter.generate(&req).map(|r| strip_markdown(&r.text))
 }
 
 // --- helpers ---
@@ -264,6 +294,7 @@ mod tests {
             model: "llama3.2".to_string(),
             endpoint: "http://localhost:11434".to_string(),
             prompt: "hello".to_string(),
+            bank_path: None,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -276,6 +307,7 @@ mod tests {
             model: "llama3.2".to_string(),
             endpoint: "http://localhost:11434".to_string(),
             prompt: "hello".to_string(),
+            bank_path: None,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -310,5 +342,131 @@ mod tests {
     fn cli_args_fails_without_prompt() {
         let raw = ["--model", "llama3.2"].iter().map(|s| s.to_string());
         assert!(CliArgs::parse(raw).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bank_tests {
+    use crate::bank::{Bank, BankEntry, Retriever};
+
+    fn sample_entries() -> Vec<BankEntry> {
+        vec![
+            BankEntry {
+                description: "find files changed in the last hour".to_string(),
+                command: "find . -mmin -60".to_string(),
+            },
+            BankEntry {
+                description: "show disk usage of current directory".to_string(),
+                command: "du -sh .".to_string(),
+            },
+            BankEntry {
+                description: "list open network ports".to_string(),
+                command: "lsof -i -n -P".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn bank_stores_and_counts_entries() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        for entry in sample_entries() {
+            bank.insert(&entry).unwrap();
+        }
+
+        assert_eq!(bank.len().unwrap(), 3);
+    }
+
+    #[test]
+    fn bank_search_returns_relevant_results() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        for entry in sample_entries() {
+            bank.insert(&entry).unwrap();
+        }
+
+        let results = bank.search("find files hour", 3).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].command, "find . -mmin -60");
+    }
+
+    #[test]
+    fn bank_search_respects_limit() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        for entry in sample_entries() {
+            bank.insert(&entry).unwrap();
+        }
+
+        let results = bank.search("find disk ports", 2).unwrap();
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn retriever_returns_top_n_for_query() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        for entry in sample_entries() {
+            bank.insert(&entry).unwrap();
+        }
+
+        let retriever = Retriever::new(&bank, 2);
+        let results = retriever.retrieve("disk usage").unwrap();
+
+        assert!(!results.is_empty());
+        assert!(results.len() <= 2);
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use crate::bank::BankEntry;
+    use crate::prompt::{PromptBuilder, strip_markdown};
+
+    fn entries() -> Vec<BankEntry> {
+        vec![
+            BankEntry {
+                description: "find files changed in the last hour".to_string(),
+                command: "find . -mmin -60".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn system_prompt_contains_example_description_and_command() {
+        let builder = PromptBuilder::new(entries());
+        let prompt = builder.system_prompt();
+
+        assert!(prompt.contains("find files changed in the last hour"));
+        assert!(prompt.contains("find . -mmin -60"));
+    }
+
+    #[test]
+    fn system_prompt_contains_instruction_header() {
+        let builder = PromptBuilder::new(entries());
+        let prompt = builder.system_prompt();
+
+        assert!(prompt.to_lowercase().contains("shell") || prompt.contains("command"));
+    }
+
+    #[test]
+    fn strip_markdown_removes_backtick_fences() {
+        assert_eq!(strip_markdown("```\nfind . -mmin -60\n```"), "find . -mmin -60");
+    }
+
+    #[test]
+    fn strip_markdown_removes_inline_backticks() {
+        assert_eq!(strip_markdown("`ls -la`"), "ls -la");
+    }
+
+    #[test]
+    fn strip_markdown_leaves_plain_commands_unchanged() {
+        assert_eq!(strip_markdown("du -sh ."), "du -sh .");
+    }
+
+    #[test]
+    fn strip_markdown_removes_shell_language_hint() {
+        assert_eq!(strip_markdown("```shell\ndu -sh .\n```"), "du -sh .");
+        assert_eq!(strip_markdown("```bash\ndu -sh .\n```"), "du -sh .");
     }
 }
