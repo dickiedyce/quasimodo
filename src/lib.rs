@@ -446,7 +446,30 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
     };
 
     if args.explain {
-        return Ok(raw);
+        return Ok(one_line_explanation(&raw));
+    }
+
+    if command_quality_score(&args.prompt, &raw) < 0 {
+        let retry_prompt = format!(
+            "{} (previous answer '{}' was low quality for this request; return a more relevant shell command)",
+            args.prompt, raw
+        );
+        let retry = generate_once(&retry_prompt)?;
+        if command_quality_score(&args.prompt, &retry) > command_quality_score(&args.prompt, &raw) {
+            if let Some(path) = &args.history_file {
+                let mut next_history = history.clone();
+                next_history.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: args.prompt.clone(),
+                });
+                next_history.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: retry.clone(),
+                });
+                save_history(path, &next_history)?;
+            }
+            return Ok(retry);
+        }
     }
 
     // Command existence validation: retry once if the binary doesn't exist.
@@ -481,6 +504,62 @@ fn is_local_endpoint(endpoint: &str) -> bool {
         || endpoint.starts_with("https://localhost")
         || endpoint.starts_with("http://127.0.0.1")
         || endpoint.starts_with("https://127.0.0.1")
+}
+
+fn one_line_explanation(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn command_quality_score(prompt: &str, command: &str) -> i32 {
+    let p = prompt.to_lowercase();
+    let c = command.to_lowercase();
+    let mut score = 0;
+
+    // Baseline: commands that exist locally are better than unknown binaries.
+    if command_exists(command_name(command)) {
+        score += 2;
+    } else {
+        score -= 2;
+    }
+
+    // Penalize clearly unrelated heavy-tool domains unless requested.
+    if c.starts_with("docker") && !p.contains("docker") {
+        score -= 2;
+    }
+    if c.starts_with("kubectl") && !p.contains("kubernetes") && !p.contains("k8s") {
+        score -= 2;
+    }
+
+    // Intent-specific boosts/penalties.
+    if p.contains("disk") && p.contains("usage") {
+        if c.starts_with("du") || c.starts_with("df") {
+            score += 4;
+        } else {
+            score -= 3;
+        }
+    }
+
+    if p.contains("changed") && p.contains("file") {
+        if c.starts_with("find") || c.starts_with("git") {
+            score += 4;
+        } else {
+            score -= 3;
+        }
+    }
+
+    if p.contains("open") && p.contains("port") {
+        if c.starts_with("lsof") || c.starts_with("netstat") {
+            score += 4;
+        } else {
+            score -= 3;
+        }
+    }
+
+    score
 }
 
 #[cfg(test)]
@@ -812,6 +891,87 @@ mod tests {
 
         let result = run(&args, &EchoAdapter).unwrap();
         assert!(result.starts_with("echo "));
+    }
+
+    struct MultilineExplainAdapter;
+
+    impl ProviderAdapter for MultilineExplainAdapter {
+        fn is_local_available(&self) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse, ProviderError> {
+            Ok(GenerateResponse {
+                text: "line one explanation\nline two detail".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn run_explain_mode_returns_single_line() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "Command: git push -- Exit code: 128".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: true,
+            samples: 1,
+            temperature: 0.0,
+            stdin: false,
+            system_prompt: None,
+            history_file: None,
+        };
+
+        let result = run(&args, &MultilineExplainAdapter).unwrap();
+        assert_eq!(result, "line one explanation");
+    }
+
+    struct LowThenBetterAdapter {
+        idx: std::cell::Cell<usize>,
+    }
+
+    impl LowThenBetterAdapter {
+        fn new() -> Self {
+            Self {
+                idx: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl ProviderAdapter for LowThenBetterAdapter {
+        fn is_local_available(&self) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse, ProviderError> {
+            let i = self.idx.get();
+            self.idx.set(i + 1);
+            let text = if i == 0 { "echo hi" } else { "du -sh ." };
+            Ok(GenerateResponse {
+                text: text.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn run_retries_when_response_quality_is_low_for_prompt_intent() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "show disk usage".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: false,
+            samples: 1,
+            temperature: 0.0,
+            stdin: false,
+            system_prompt: None,
+            history_file: None,
+        };
+
+        let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
+        assert_eq!(out, "du -sh .");
     }
 
     struct ChatOnlyAdapter;
