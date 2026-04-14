@@ -224,6 +224,7 @@ pub struct CliArgs {
     pub stdin: bool,
     pub system_prompt: Option<String>,
     pub history_file: Option<String>,
+    pub quality_retry: bool,
 }
 
 impl CliArgs {
@@ -239,6 +240,7 @@ impl CliArgs {
         let mut stdin = false;
         let mut system_prompt: Option<String> = None;
         let mut history_file: Option<String> = None;
+        let mut quality_retry = true;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -289,6 +291,9 @@ impl CliArgs {
                 "--history-file" => {
                     history_file = Some(args.next().ok_or("--history-file requires a path")?);
                 }
+                "--no-quality-retry" => {
+                    quality_retry = false;
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -313,6 +318,7 @@ impl CliArgs {
             stdin,
             system_prompt,
             history_file,
+            quality_retry,
         })
     }
 }
@@ -449,7 +455,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         return Ok(one_line_explanation(&raw));
     }
 
-    if command_quality_score(&args.prompt, &raw) < 0 {
+    if args.quality_retry && command_quality_score(&args.prompt, &raw) < 0 {
         let retry_prompt = format!(
             "{} (previous answer '{}' was low quality for this request; return a more relevant shell command)",
             args.prompt, raw
@@ -708,6 +714,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -728,6 +735,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -805,6 +813,16 @@ mod tests {
         let args = CliArgs::parse(raw).unwrap();
         assert_eq!(args.samples, 1);
         assert_eq!(args.temperature, 0.0);
+        assert!(args.quality_retry);
+    }
+
+    #[test]
+    fn cli_args_parse_no_quality_retry_flag() {
+        let raw = ["--prompt", "hello", "--no-quality-retry"]
+            .iter()
+            .map(|s| s.to_string());
+        let args = CliArgs::parse(raw).unwrap();
+        assert!(!args.quality_retry);
     }
 
     #[test]
@@ -866,6 +884,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         let adapter = CyclingAdapter::new();
@@ -887,6 +906,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -921,6 +941,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         let result = run(&args, &MultilineExplainAdapter).unwrap();
@@ -968,6 +989,7 @@ mod tests {
             stdin: false,
             system_prompt: None,
             history_file: None,
+            quality_retry: true,
         };
 
         let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
@@ -1006,6 +1028,7 @@ mod tests {
             stdin: false,
             system_prompt: Some("You are concise".to_string()),
             history_file: None,
+            quality_retry: true,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1034,6 +1057,7 @@ mod tests {
             stdin: false,
             system_prompt: Some("You are concise".to_string()),
             history_file: Some(path.to_string_lossy().to_string()),
+            quality_retry: true,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();

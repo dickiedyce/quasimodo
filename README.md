@@ -51,6 +51,9 @@ cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank ./t
 # Multi-turn with persisted history
 cargo run -- --prompt "show largest files" --history-file ./session.json --system "Return only shell commands"
 cargo run -- --prompt "now limit to current folder" --history-file ./session.json --system "Return only shell commands"
+
+# Quality benchmark (A/B: no-retry vs retry)
+cargo run --bin quality_benchmark -- ./tldr_bank.db
 ```
 
 ## zsh Hooks
