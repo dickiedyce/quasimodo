@@ -88,8 +88,12 @@ command_not_found_handler() {
   unsetopt xtrace
   local missing="$1"
   local suggestion
-  suggestion="$($QUASIMODO_BIN --notfound "$missing" --bank "$QUASIMODO_BANK" 2>/dev/null)" || return 127
+  suggestion="$($QUASIMODO_BIN --notfound "$missing" --bank "$QUASIMODO_BANK" 2>/dev/null)" || {
+    _QUASIMODO_IN_ZERR=1
+    return 127
+  }
   [[ -n "$suggestion" ]] && print -P "%F{244}$suggestion%f"
+  _QUASIMODO_IN_ZERR=1
   return 127
 }
 
@@ -99,7 +103,10 @@ TRAPZERR() {
   unsetopt xtrace
 
   local code="$?"
-  (( _QUASIMODO_IN_ZERR )) && return 0
+  if (( _QUASIMODO_IN_ZERR )); then
+    _QUASIMODO_IN_ZERR=0
+    return 0
+  fi
 
   local cmd="$history[$HISTCMD]"
   [[ -z "$cmd" ]] && return 0
