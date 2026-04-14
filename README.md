@@ -73,8 +73,37 @@ cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank "$H
 cargo run -- --prompt "show largest files" --history-file ./session.json --system "Return only shell commands"
 cargo run -- --prompt "now limit to current folder" --history-file ./session.json --system "Return only shell commands"
 
+# Teach a corrected example (stored permanently; beats TLDR entries in search)
+quasimodo --teach "date 90 days ago" \
+          --command "date -v -90d '+%Y-%m-%d'" \
+          --bank "$HOME/.quasimodo/tldr_bank.db"
+
 # Quality benchmark (A/B: no-retry vs retry)
 cargo run --bin quality_benchmark -- "$HOME/.quasimodo/tldr_bank.db"
+```
+
+## Teaching Corrections
+
+If quasimodo returns a wrong or suboptimal command, store the correct one with `--teach`:
+
+```bash
+quasimodo --teach "<natural language description>" \
+          --command "<correct shell command>" \
+          --bank "$HOME/.quasimodo/tldr_bank.db"
+```
+
+User-taught examples are stored in a separate `user_examples` table and always ranked above TLDR entries in retrieval. They survive `build-bank` rebuilds.
+
+Example — macOS `date` arithmetic:
+
+```bash
+quasimodo --teach "what is the date in 3 weeks" \
+          --command "date -v +3w '+%Y-%m-%d'" \
+          --bank "$HOME/.quasimodo/tldr_bank.db"
+
+quasimodo --teach "date 90 days ago" \
+          --command "date -v -90d '+%Y-%m-%d'" \
+          --bank "$HOME/.quasimodo/tldr_bank.db"
 ```
 
 ## zsh Hooks
