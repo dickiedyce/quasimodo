@@ -427,7 +427,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         }
     };
 
-    let raw = if args.samples > 1 && !args.explain {
+    let raw_unchecked = if args.samples > 1 && !args.explain {
         use std::collections::HashMap;
 
         let mut counts: HashMap<String, usize> = HashMap::new();
@@ -451,6 +451,12 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         generate_once(&final_prompt)?
     };
 
+    let raw = if args.explain {
+        raw_unchecked
+    } else {
+        normalize_command_output(&args.prompt, &raw_unchecked)
+    };
+
     if args.explain {
         return Ok(one_line_explanation(&raw));
     }
@@ -460,7 +466,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
             "{} (previous answer '{}' was low quality for this request; return a more relevant shell command)",
             args.prompt, raw
         );
-        let retry = generate_once(&retry_prompt)?;
+        let retry = normalize_command_output(&args.prompt, &generate_once(&retry_prompt)?);
         if command_quality_score(&args.prompt, &retry) > command_quality_score(&args.prompt, &raw) {
             if let Some(path) = &args.history_file {
                 let mut next_history = history.clone();
@@ -518,6 +524,93 @@ fn one_line_explanation(text: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("")
         .to_string()
+}
+
+fn normalize_command_output(prompt: &str, text: &str) -> String {
+    extract_command_candidate(prompt, text).unwrap_or_else(|| text.trim().to_string())
+}
+
+fn extract_command_candidate(prompt: &str, text: &str) -> Option<String> {
+    let mut best: Option<(i32, String)> = None;
+
+    for raw in text.lines() {
+        let mut line = raw.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Drop common list prefixes.
+        if line.starts_with("- ") || line.starts_with("* ") {
+            line = line[2..].trim().to_string();
+        }
+        if let Some(dot) = line.find('.') {
+            if dot < 3 && line[..dot].chars().all(|c| c.is_ascii_digit()) {
+                line = line[dot + 1..].trim().to_string();
+            }
+        }
+
+        // Drop surrounding backticks for inline snippets.
+        if line.starts_with('`') && line.ends_with('`') && line.len() > 1 {
+            line = line[1..line.len() - 1].trim().to_string();
+        }
+
+        let score = candidate_score(prompt, &line);
+        if score <= 0 {
+            continue;
+        }
+
+        match &best {
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => best = Some((score, line)),
+        }
+    }
+
+    best.map(|(_, line)| line)
+}
+
+fn candidate_score(prompt: &str, candidate: &str) -> i32 {
+    let c = candidate.trim();
+    if c.is_empty() {
+        return -10;
+    }
+
+    // Hard reject obvious prose/explanations.
+    let lc = c.to_lowercase();
+    let prose_starts = [
+        "here", "to ", "if ", "you ", "this ", "that ", "note", "method",
+        "steps", "example", "please", "the ", "an ", "a ",
+    ];
+    if prose_starts.iter().any(|p| lc.starts_with(p)) {
+        return -5;
+    }
+
+    let mut score = 0;
+
+    if command_exists(command_name(c)) {
+        score += 4;
+    }
+
+    // Command-ish structure indicators.
+    if c.contains(" -") {
+        score += 1;
+    }
+    if c.contains('|') || c.contains('>') || c.contains('<') || c.contains("$") {
+        score += 1;
+    }
+    if c.contains("&&") || c.contains("||") {
+        score += 1;
+    }
+
+    // Penalize clearly sentence-like lines.
+    if c.ends_with(':') {
+        score -= 2;
+    }
+    if c.split_whitespace().count() > 14 {
+        score -= 2;
+    }
+
+    // Use existing intent scoring as secondary signal.
+    score + command_quality_score(prompt, c)
 }
 
 fn command_quality_score(prompt: &str, command: &str) -> i32 {
@@ -994,6 +1087,31 @@ mod tests {
 
         let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
         assert_eq!(out, "du -sh .");
+    }
+
+    #[test]
+    fn extract_command_candidate_from_verbose_text() {
+        let verbose = r#"
+Here is how to test if a port is open:
+1. Use netcat:
+nc -z example.com 443
+2. Or use nmap.
+"#;
+
+        let extracted = normalize_command_output("test if port 443 is open", verbose);
+        assert_eq!(extracted, "nc -z example.com 443");
+    }
+
+    #[test]
+    fn extract_command_candidate_from_dns_prose() {
+        let verbose = r#"
+The easiest way to resolve DNS is:
+nslookup github.com
+This should return the address.
+"#;
+
+        let extracted = normalize_command_output("resolve github.com dns", verbose);
+        assert_eq!(extracted, "nslookup github.com");
     }
 
     struct ChatOnlyAdapter;
