@@ -2,18 +2,25 @@
 #
 # Usage:
 #   export QUASIMODO_BIN="$HOME/.local/bin/quasimodo"
-#   export QUASIMODO_BANK="$HOME/.local/share/quasimodo/tldr_bank.db"
+#   export QUASIMODO_BANK="$HOME/.quasimodo/tldr_bank.db"
 #   export QUASIMODO_SYSTEM="Return only shell commands"
-#   export QUASIMODO_HISTORY="$HOME/.local/share/quasimodo/session.json"
+#   export QUASIMODO_HISTORY="$HOME/.quasimodo/session.json"
+#   export QUASIMODO_KEY="^G"
+#   export QUASIMODO_ALT_KEY="^X^G"
 #   source /path/to/quasimodo/hooks/quasimodo.zsh
 
-: "${QUASIMODO_BIN:=quasimodo}"
-: "${QUASIMODO_BANK:=tldr_bank.db}"
+: "${QUASIMODO_BIN:=$HOME/.local/bin/quasimodo}"
+: "${QUASIMODO_BANK:=$HOME/.quasimodo/tldr_bank.db}"
 : "${QUASIMODO_SYSTEM:=}"
 : "${QUASIMODO_HISTORY:=}"
+: "${QUASIMODO_KEY:=^G}"
+: "${QUASIMODO_ALT_KEY:=^X^G}"
+
+typeset -gi _QUASIMODO_IN_ZERR=0
 
 _quasimodo_ctrl_g() {
   emulate -L zsh
+  unsetopt xtrace
   local input="$BUFFER"
   [[ -z "$input" ]] && return
 
@@ -22,20 +29,37 @@ _quasimodo_ctrl_g() {
   [[ -n "$QUASIMODO_HISTORY" ]] && extra+=(--history-file "$QUASIMODO_HISTORY")
 
   local output
-  output="$($QUASIMODO_BIN --prompt "$input" --bank "$QUASIMODO_BANK" "${extra[@]}" 2>/dev/null)" || return
-  [[ -z "$output" ]] && return
+  zle -M "quasimodo: rewriting..."
+  output="$($QUASIMODO_BIN --prompt "$input" --bank "$QUASIMODO_BANK" "${extra[@]}" 2>/dev/null)" || {
+    zle -M "quasimodo: check QUASIMODO_BIN/QUASIMODO_BANK and Ollama"
+    return 0
+  }
+  [[ -z "$output" ]] && {
+    zle -M "quasimodo: no suggestion returned"
+    return 0
+  }
 
   BUFFER="$output"
   CURSOR=${#BUFFER}
+  zle -M "quasimodo: rewrite ready"
   zle redisplay
 }
 
 # Ctrl+G to transform natural language into a command in-place (never auto-runs).
 zle -N _quasimodo_ctrl_g
-bindkey '^G' _quasimodo_ctrl_g
+bindkey "$QUASIMODO_KEY" _quasimodo_ctrl_g
+bindkey -M emacs "$QUASIMODO_KEY" _quasimodo_ctrl_g
+bindkey -M viins "$QUASIMODO_KEY" _quasimodo_ctrl_g
+
+if [[ -n "$QUASIMODO_ALT_KEY" ]]; then
+  bindkey "$QUASIMODO_ALT_KEY" _quasimodo_ctrl_g
+  bindkey -M emacs "$QUASIMODO_ALT_KEY" _quasimodo_ctrl_g
+  bindkey -M viins "$QUASIMODO_ALT_KEY" _quasimodo_ctrl_g
+fi
 
 command_not_found_handler() {
   emulate -L zsh
+  unsetopt xtrace
   local missing="$1"
   local suggestion
   suggestion="$($QUASIMODO_BIN --notfound "$missing" --bank "$QUASIMODO_BANK" 2>/dev/null)" || return 127
@@ -45,17 +69,20 @@ command_not_found_handler() {
 
 TRAPZERR() {
   emulate -L zsh
-
-  # Don't recurse from within the helper itself.
-  [[ "$1" == "quasimodo" ]] && return $?
+  unsetopt xtrace
 
   local code="$?"
+  (( _QUASIMODO_IN_ZERR )) && return 0
+
   local cmd="$history[$HISTCMD]"
-  [[ -z "$cmd" ]] && return $code
+  [[ -z "$cmd" ]] && return 0
 
   local explain
-  explain="$($QUASIMODO_BIN --explain "Command: $cmd -- Exit code: $code" 2>/dev/null)" || return $code
+  print -P "%F{244}quasimodo: explaining...%f"
+  _QUASIMODO_IN_ZERR=1
+  explain="$($QUASIMODO_BIN --explain "Command: $cmd -- Exit code: $code" 2>/dev/null)"
+  _QUASIMODO_IN_ZERR=0
   [[ -n "$explain" ]] && print -P "%F{244}$explain%f"
 
-  return $code
+  return 0
 }

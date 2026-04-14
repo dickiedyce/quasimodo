@@ -14,6 +14,23 @@ Native macOS-first Rust implementation inspired by hunch, with a local-first LLM
 cargo build
 ```
 
+Optional install location used by hook examples:
+
+```bash
+./scripts/install_local.sh
+```
+
+The script copies:
+
+- `target/debug/quasimodo` -> `$HOME/.local/bin/quasimodo`
+- `hooks/quasimodo.zsh` -> `$HOME/.quasimodo/hooks/quasimodo.zsh`
+
+Optional custom destinations:
+
+```bash
+QUASIMODO_BIN_DIR="$HOME/.local/bin" QUASIMODO_HOOK_DIR="$HOME/.quasimodo/hooks" ./scripts/install_local.sh
+```
+
 ## Test
 
 ```bash
@@ -33,42 +50,93 @@ Typical local workflow:
 ## CLI Usage
 
 ```bash
+# Build/refresh the local retrieval database first
+mkdir -p "$HOME/.quasimodo"
+cargo run --bin build-bank -- "$HOME/.quasimodo/tldr_bank.db"
+
 # Command generation from plain English
-cargo run -- --prompt "find files changed in the last hour" --bank ./tldr_bank.db
+cargo run -- --prompt "find files changed in the last hour" --bank "$HOME/.quasimodo/tldr_bank.db"
 
 # Command-not-found helper mode
-cargo run -- --notfound ip --bank ./tldr_bank.db
+cargo run -- --notfound ip --bank "$HOME/.quasimodo/tldr_bank.db"
 
 # Error explanation helper mode
 cargo run -- --explain "Command: git push -- Exit code: 128"
 
 # Pipe mode
-echo "find files changed in the last hour" | cargo run -- --stdin --bank ./tldr_bank.db
+echo "find files changed in the last hour" | cargo run -- --stdin --bank "$HOME/.quasimodo/tldr_bank.db"
 
 # Optional: majority-vote consistency mode
-cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank ./tldr_bank.db
+cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank "$HOME/.quasimodo/tldr_bank.db"
 
 # Multi-turn with persisted history
 cargo run -- --prompt "show largest files" --history-file ./session.json --system "Return only shell commands"
 cargo run -- --prompt "now limit to current folder" --history-file ./session.json --system "Return only shell commands"
 
 # Quality benchmark (A/B: no-retry vs retry)
-cargo run --bin quality_benchmark -- ./tldr_bank.db
+cargo run --bin quality_benchmark -- "$HOME/.quasimodo/tldr_bank.db"
 ```
 
 ## zsh Hooks
 
+Add the following lines to your `~/.zshrc` so hooks load automatically in every interactive shell:
+
 ```bash
-export QUASIMODO_BIN="$PWD/target/debug/quasimodo"
-export QUASIMODO_BANK="$PWD/tldr_bank.db"
-source "$PWD/hooks/quasimodo.zsh"
+# optional (these are also the hook defaults):
+# export QUASIMODO_BIN="$HOME/.local/bin/quasimodo"
+# export QUASIMODO_BANK="$HOME/.quasimodo/tldr_bank.db"
+# optional:
+# export QUASIMODO_SYSTEM="Return only shell commands"
+# export QUASIMODO_HISTORY="$HOME/.quasimodo/session.json"
+# export QUASIMODO_KEY="^]"
+# export QUASIMODO_ALT_KEY=""
+source "$HOME/.quasimodo/hooks/quasimodo.zsh"
+```
+
+Recommended single-key binding on macOS terminals:
+
+```bash
+export QUASIMODO_KEY="^]"
+export QUASIMODO_ALT_KEY=""
+source "$HOME/.quasimodo/hooks/quasimodo.zsh"
+```
+
+Key notation examples:
+
+- `^]` = Ctrl+]
+- `^G` = Ctrl+G
+- `^X^G` = Ctrl+X then Ctrl+G
+
+Reload your shell after saving:
+
+```bash
+source ~/.zshrc
 ```
 
 This enables:
 
-1. `Ctrl+G` to rewrite natural language in your shell buffer into a command.
+1. `Ctrl+]` (or your configured key) rewrites natural language in your shell buffer into a command.
 2. `command_not_found_handler` suggestions via `--notfound`.
 3. `TRAPZERR` one-line explanations via `--explain`.
+
+If your key binding does not trigger, run this quick check:
+
+```bash
+quasimodo --prompt "show current directory" --bank "$HOME/.quasimodo/tldr_bank.db"
+```
+
+If that fails, verify Ollama is running and that your DB exists at `$HOME/.quasimodo/tldr_bank.db`.
+
+## Regenerate the DB
+
+Rebuild the local retrieval database whenever you want fresher examples:
+
+```bash
+mkdir -p "$HOME/.quasimodo"
+cargo run --bin build-bank -- "$HOME/.quasimodo/tldr_bank.db"
+```
+
+If your `~/.zshrc` uses `QUASIMODO_BANK="$HOME/.quasimodo/tldr_bank.db"`, hooks will automatically use the regenerated database on the next shell session.
 
 ## Design Notes
 
