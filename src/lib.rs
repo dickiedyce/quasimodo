@@ -463,8 +463,10 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
 
     if args.quality_retry && command_quality_score(&args.prompt, &raw) < 0 {
         let retry_prompt = format!(
-            "{} (previous answer '{}' was low quality for this request; return a more relevant shell command)",
-            args.prompt, raw
+            "{} (previous answer '{}' was low quality for this request; {})",
+            args.prompt,
+            raw,
+            retry_guidance(&args.prompt)
         );
         let retry = normalize_command_output(&args.prompt, &generate_once(&retry_prompt)?);
         if command_quality_score(&args.prompt, &retry) > command_quality_score(&args.prompt, &raw) {
@@ -534,38 +536,60 @@ fn extract_command_candidate(prompt: &str, text: &str) -> Option<String> {
     let mut best: Option<(i32, String)> = None;
 
     for raw in text.lines() {
-        let mut line = raw.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Drop common list prefixes.
-        if line.starts_with("- ") || line.starts_with("* ") {
-            line = line[2..].trim().to_string();
-        }
-        if let Some(dot) = line.find('.') {
-            if dot < 3 && line[..dot].chars().all(|c| c.is_ascii_digit()) {
-                line = line[dot + 1..].trim().to_string();
+        for line in candidate_fragments(raw) {
+            let score = candidate_score(prompt, &line);
+            if score <= 0 {
+                continue;
             }
-        }
 
-        // Drop surrounding backticks for inline snippets.
-        if line.starts_with('`') && line.ends_with('`') && line.len() > 1 {
-            line = line[1..line.len() - 1].trim().to_string();
-        }
-
-        let score = candidate_score(prompt, &line);
-        if score <= 0 {
-            continue;
-        }
-
-        match &best {
-            Some((best_score, _)) if *best_score >= score => {}
-            _ => best = Some((score, line)),
+            match &best {
+                Some((best_score, _)) if *best_score >= score => {}
+                _ => best = Some((score, line)),
+            }
         }
     }
 
     best.map(|(_, line)| line)
+}
+
+fn candidate_fragments(raw: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut line = raw.trim().to_string();
+    if line.is_empty() {
+        return candidates;
+    }
+
+    if line.starts_with("- ") || line.starts_with("* ") {
+        line = line[2..].trim().to_string();
+    }
+    if let Some(dot) = line.find('.') {
+        if dot < 3 && line[..dot].chars().all(|c| c.is_ascii_digit()) {
+            line = line[dot + 1..].trim().to_string();
+        }
+    }
+
+    if line.starts_with('`') && line.ends_with('`') && line.len() > 1 {
+        line = line[1..line.len() - 1].trim().to_string();
+    }
+
+    candidates.push(line.clone());
+
+    // Also extract inline backticked fragments from prose-heavy lines.
+    let mut rest = raw;
+    while let Some(start) = rest.find('`') {
+        let tail = &rest[start + 1..];
+        if let Some(end) = tail.find('`') {
+            let fragment = tail[..end].trim();
+            if !fragment.is_empty() {
+                candidates.push(fragment.to_string());
+            }
+            rest = &tail[end + 1..];
+        } else {
+            break;
+        }
+    }
+
+    candidates
 }
 
 fn candidate_score(prompt: &str, candidate: &str) -> i32 {
@@ -573,6 +597,7 @@ fn candidate_score(prompt: &str, candidate: &str) -> i32 {
     if c.is_empty() {
         return -10;
     }
+    let p = prompt.to_lowercase();
 
     // Hard reject obvious prose/explanations.
     let lc = c.to_lowercase();
@@ -607,6 +632,13 @@ fn candidate_score(prompt: &str, candidate: &str) -> i32 {
     }
     if c.split_whitespace().count() > 14 {
         score -= 2;
+    }
+
+    // Penalize Linux-centric network commands on macOS unless explicitly requested.
+    if (p.contains("network") || p.contains("port") || p.contains("dns") || p.contains("interface"))
+        && (lc.starts_with("ss ") || lc == "ss" || lc.starts_with("ip ") || lc == "ip")
+    {
+        score -= 4;
     }
 
     // Use existing intent scoring as secondary signal.
@@ -651,14 +683,56 @@ fn command_quality_score(prompt: &str, command: &str) -> i32 {
     }
 
     if p.contains("open") && p.contains("port") {
-        if c.starts_with("lsof") || c.starts_with("netstat") {
+        if c.starts_with("lsof") || c.starts_with("netstat") || c.starts_with("nc") || c.starts_with("nmap") || c.starts_with("telnet") {
             score += 4;
         } else {
             score -= 3;
         }
     }
 
+    if p.contains("listen") && p.contains("port") {
+        if c.starts_with("lsof") || c.starts_with("netstat") {
+            score += 4;
+        }
+        if c.starts_with("ss") {
+            score -= 4;
+        }
+    }
+
+    if p.contains("dns") || p.contains("resolve") {
+        if c.starts_with("dig") || c.starts_with("nslookup") || c.starts_with("host") {
+            score += 5;
+        } else {
+            score -= 3;
+        }
+    }
+
+    if p.contains("interface") {
+        if c.starts_with("ifconfig") || c.starts_with("networksetup") {
+            score += 4;
+        }
+        if c.starts_with("ip") {
+            score -= 4;
+        }
+    }
+
     score
+}
+
+fn retry_guidance(prompt: &str) -> &'static str {
+    let p = prompt.to_lowercase();
+
+    if p.contains("dns") || p.contains("resolve") {
+        "return exactly one macOS shell command with no prose; prefer dig, nslookup, or host"
+    } else if p.contains("open") && p.contains("port") {
+        "return exactly one shell command with no prose; prefer nc, lsof, netstat, nmap, or telnet"
+    } else if p.contains("listen") && p.contains("port") {
+        "return exactly one macOS shell command with no prose; prefer lsof or netstat, not ss"
+    } else if p.contains("interface") || p.contains("network interfaces") {
+        "return exactly one macOS shell command with no prose; prefer ifconfig or networksetup"
+    } else {
+        "return exactly one more relevant shell command with no prose"
+    }
 }
 
 #[cfg(test)]
@@ -1112,6 +1186,20 @@ This should return the address.
 
         let extracted = normalize_command_output("resolve github.com dns", verbose);
         assert_eq!(extracted, "nslookup github.com");
+    }
+
+    #[test]
+    fn extract_inline_backticked_network_command_from_prose() {
+        let verbose = "Use `nc -z example.com 443` to test whether the port is open.";
+
+        let extracted = normalize_command_output("test if port 443 is open on example.com", verbose);
+        assert_eq!(extracted, "nc -z example.com 443");
+    }
+
+    #[test]
+    fn retry_guidance_is_dns_specific() {
+        assert!(retry_guidance("resolve github.com dns").contains("dig"));
+        assert!(retry_guidance("resolve github.com dns").contains("nslookup"));
     }
 
     struct ChatOnlyAdapter;
