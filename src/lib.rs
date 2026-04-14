@@ -1,7 +1,10 @@
 pub mod bank;
+pub mod filter;
+pub mod notfound;
 pub mod prompt;
 
 use bank::{Bank, Retriever};
+use filter::{command_exists, command_name, is_sensitive};
 use prompt::{PromptBuilder, strip_markdown};
 use serde_json::{Value, json};
 
@@ -114,6 +117,7 @@ pub struct CliArgs {
     pub endpoint: String,
     pub prompt: String,
     pub bank_path: Option<String>,
+    pub notfound: bool,
 }
 
 impl CliArgs {
@@ -122,6 +126,7 @@ impl CliArgs {
         let mut endpoint = "http://localhost:11434".to_string();
         let mut prompt: Option<String> = None;
         let mut bank_path: Option<String> = None;
+        let mut notfound = false;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -137,6 +142,13 @@ impl CliArgs {
                 "--bank" => {
                     bank_path = Some(args.next().ok_or("--bank requires a path")?);
                 }
+                "--notfound" => {
+                    notfound = true;
+                    // consume the command-not-found command name as the prompt
+                    if prompt.is_none() {
+                        prompt = Some(args.next().ok_or("--notfound requires a command name")?);
+                    }
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -146,11 +158,34 @@ impl CliArgs {
             endpoint,
             prompt: prompt.ok_or("--prompt is required")?,
             bank_path,
+            notfound,
         })
     }
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
+    // Sensitive filter: never send credential-containing prompts to the model.
+    if is_sensitive(&args.prompt) {
+        return Err(ProviderError::InvalidConfig(
+            "prompt contains sensitive content".to_string(),
+        ));
+    }
+
+    // --notfound mode: resolve via static maps before calling the model.
+    if args.notfound {
+        use notfound::{suggest_not_found, NotFoundSuggestion};
+        let bank = args.bank_path.as_deref().and_then(|p| Bank::open(p).ok());
+        let suggestion = suggest_not_found(&args.prompt, bank.as_ref());
+        return Ok(match suggestion {
+            NotFoundSuggestion::Typo(s) => format!("did you mean: {s}"),
+            NotFoundSuggestion::Install { formula } => {
+                format!("not installed: brew install {formula}")
+            }
+            NotFoundSuggestion::MacOsEquivalent(s) => format!("macOS equivalent: {s}"),
+            NotFoundSuggestion::Unknown => format!("command not found: {}", args.prompt),
+        });
+    }
+
     let system = if let Some(ref path) = args.bank_path {
         Bank::open(path)
             .ok()
@@ -174,7 +209,22 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         prompt: full_prompt,
     };
 
-    adapter.generate(&req).map(|r| strip_markdown(&r.text))
+    let raw = adapter.generate(&req).map(|r| strip_markdown(&r.text))?;
+
+    // Command existence validation: retry once if the binary doesn't exist.
+    if !command_exists(command_name(&raw)) {
+        let retry_prompt = format!(
+            "{} (previous answer '{}' was not a valid command, try again)",
+            args.prompt, raw
+        );
+        let retry_req = GenerateRequest {
+            model: args.model.clone(),
+            prompt: retry_prompt,
+        };
+        return adapter.generate(&retry_req).map(|r| strip_markdown(&r.text));
+    }
+
+    Ok(raw)
 }
 
 // --- helpers ---
@@ -247,7 +297,7 @@ mod tests {
 
         fn generate(&self, req: &GenerateRequest) -> Result<GenerateResponse, ProviderError> {
             Ok(GenerateResponse {
-                text: format!("echo:{}", req.prompt),
+                text: format!("echo {}", req.prompt),
             })
         }
     }
@@ -295,10 +345,11 @@ mod tests {
             endpoint: "http://localhost:11434".to_string(),
             prompt: "hello".to_string(),
             bank_path: None,
+            notfound: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
-        assert_eq!(result, "echo:hello");
+        assert_eq!(result, "echo hello");
     }
 
     #[test]
@@ -308,6 +359,7 @@ mod tests {
             endpoint: "http://localhost:11434".to_string(),
             prompt: "hello".to_string(),
             bank_path: None,
+            notfound: false,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -468,5 +520,99 @@ mod prompt_tests {
     fn strip_markdown_removes_shell_language_hint() {
         assert_eq!(strip_markdown("```shell\ndu -sh .\n```"), "du -sh .");
         assert_eq!(strip_markdown("```bash\ndu -sh .\n```"), "du -sh .");
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use crate::filter::{command_exists, command_name, is_sensitive};
+
+    #[test]
+    fn detects_password_keyword() {
+        assert!(is_sensitive("my password is hunter2"));
+    }
+
+    #[test]
+    fn detects_token_keyword() {
+        assert!(is_sensitive("use token abc123"));
+    }
+
+    #[test]
+    fn detects_bearer_case_insensitive() {
+        assert!(is_sensitive("Authorization: Bearer xyz"));
+    }
+
+    #[test]
+    fn allows_normal_prompts() {
+        assert!(!is_sensitive("find files changed in the last hour"));
+        assert!(!is_sensitive("show disk usage"));
+    }
+
+    #[test]
+    fn extracts_command_name_from_full_command() {
+        assert_eq!(command_name("find . -mmin -60"), "find");
+        assert_eq!(command_name("du -sh ."), "du");
+        assert_eq!(command_name("ls"), "ls");
+    }
+
+    #[test]
+    fn command_exists_finds_common_binaries() {
+        assert!(command_exists("ls"));
+        assert!(command_exists("echo"));
+    }
+
+    #[test]
+    fn command_exists_rejects_nonsense() {
+        assert!(!command_exists("xqz_not_a_real_command_7382"));
+    }
+}
+
+#[cfg(test)]
+mod notfound_tests {
+    use crate::notfound::{NotFoundSuggestion, levenshtein, suggest_not_found};
+
+    #[test]
+    fn levenshtein_identical_strings() {
+        assert_eq!(levenshtein("git", "git"), 0);
+    }
+
+    #[test]
+    fn levenshtein_one_transposition() {
+        assert_eq!(levenshtein("gti", "git"), 2);
+    }
+
+    #[test]
+    fn levenshtein_one_insertion() {
+        assert_eq!(levenshtein("gi", "git"), 1);
+    }
+
+    #[test]
+    fn suggests_typo_for_gti() {
+        let result = suggest_not_found("gti", None);
+        assert_eq!(result, NotFoundSuggestion::Typo("git".to_string()));
+    }
+
+    #[test]
+    fn suggests_brew_install_for_known_tool() {
+        let result = suggest_not_found("ncdu", None);
+        assert_eq!(
+            result,
+            NotFoundSuggestion::Install { formula: "ncdu".to_string() }
+        );
+    }
+
+    #[test]
+    fn suggests_macos_equivalent_for_ip() {
+        let result = suggest_not_found("ip", None);
+        assert_eq!(
+            result,
+            NotFoundSuggestion::MacOsEquivalent("ifconfig".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_unknown_for_unrecognised_command() {
+        let result = suggest_not_found("xqz_not_real_7382", None);
+        assert_eq!(result, NotFoundSuggestion::Unknown);
     }
 }
