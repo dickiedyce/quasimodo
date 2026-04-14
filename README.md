@@ -41,6 +41,9 @@ cargo run -- --notfound ip --bank ./tldr_bank.db
 
 # Error explanation helper mode
 cargo run -- --explain "Command: git push -- Exit code: 128"
+
+# Optional: majority-vote consistency mode
+cargo run -- --prompt "show disk usage" --samples 3 --temperature 0.3 --bank ./tldr_bank.db
 ```
 
 ## zsh Hooks

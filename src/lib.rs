@@ -8,10 +8,11 @@ use filter::{command_exists, command_name, is_sensitive};
 use prompt::{PromptBuilder, strip_markdown};
 use serde_json::{Value, json};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GenerateRequest {
     pub model: String,
     pub prompt: String,
+    pub temperature: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,7 @@ impl OllamaAdapter {
         json!({
             "model": req.model,
             "prompt": req.prompt,
+            "temperature": req.temperature,
             "stream": false
         })
         .to_string()
@@ -119,6 +121,8 @@ pub struct CliArgs {
     pub bank_path: Option<String>,
     pub notfound: bool,
     pub explain: bool,
+    pub samples: usize,
+    pub temperature: f32,
 }
 
 impl CliArgs {
@@ -129,6 +133,8 @@ impl CliArgs {
         let mut bank_path: Option<String> = None;
         let mut notfound = false;
         let mut explain = false;
+        let mut samples: usize = 1;
+        let mut temperature: f32 = 0.0;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -157,6 +163,19 @@ impl CliArgs {
                         prompt = Some(args.next().ok_or("--explain requires a value")?);
                     }
                 }
+                "--samples" => {
+                    let raw = args.next().ok_or("--samples requires a value")?;
+                    samples = raw.parse().map_err(|_| "--samples must be an integer")?;
+                    if samples == 0 {
+                        return Err("--samples must be >= 1".to_string());
+                    }
+                }
+                "--temperature" => {
+                    let raw = args.next().ok_or("--temperature requires a value")?;
+                    temperature = raw
+                        .parse()
+                        .map_err(|_| "--temperature must be a float")?;
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -168,6 +187,8 @@ impl CliArgs {
             bank_path,
             notfound,
             explain,
+            samples,
+            temperature,
         })
     }
 }
@@ -222,9 +243,32 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
     let req = GenerateRequest {
         model: args.model.clone(),
         prompt: final_prompt,
+        temperature: args.temperature,
     };
 
-    let raw = adapter.generate(&req).map(|r| strip_markdown(&r.text))?;
+    let raw = if args.samples > 1 && !args.explain {
+        use std::collections::HashMap;
+
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut first: Option<String> = None;
+
+        for _ in 0..args.samples {
+            let sample = adapter.generate(&req).map(|r| strip_markdown(&r.text))?;
+            if first.is_none() {
+                first = Some(sample.clone());
+            }
+            *counts.entry(sample).or_insert(0) += 1;
+        }
+
+        counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(s, _)| s)
+            .or(first)
+            .unwrap_or_default()
+    } else {
+        adapter.generate(&req).map(|r| strip_markdown(&r.text))?
+    };
 
     if args.explain {
         return Ok(raw);
@@ -239,6 +283,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         let retry_req = GenerateRequest {
             model: args.model.clone(),
             prompt: retry_prompt,
+            temperature: args.temperature,
         };
         return adapter.generate(&retry_req).map(|r| strip_markdown(&r.text));
     }
@@ -289,6 +334,7 @@ mod tests {
         let req = GenerateRequest {
             model: "llama3.2".to_string(),
             prompt: "hello".to_string(),
+            temperature: 0.0,
         };
 
         let payload = OllamaAdapter::build_generate_payload(&req);
@@ -346,6 +392,7 @@ mod tests {
         let req = GenerateRequest {
             model: "m".to_string(),
             prompt: "p".to_string(),
+            temperature: 0.0,
         };
 
         assert!(EchoAdapter.generate(&req).is_ok());
@@ -366,6 +413,8 @@ mod tests {
             bank_path: None,
             notfound: false,
             explain: false,
+            samples: 1,
+            temperature: 0.0,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -381,6 +430,8 @@ mod tests {
             bank_path: None,
             notfound: false,
             explain: false,
+            samples: 1,
+            temperature: 0.0,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -431,6 +482,81 @@ mod tests {
     }
 
     #[test]
+    fn cli_args_parse_samples_and_temperature() {
+        let raw = [
+            "--prompt",
+            "hello",
+            "--samples",
+            "3",
+            "--temperature",
+            "0.3",
+        ]
+        .iter()
+        .map(|s| s.to_string());
+
+        let args = CliArgs::parse(raw).unwrap();
+        assert_eq!(args.samples, 3);
+        assert_eq!(args.temperature, 0.3);
+    }
+
+    #[test]
+    fn cli_args_defaults_samples_and_temperature() {
+        let raw = ["--prompt", "hello"].iter().map(|s| s.to_string());
+        let args = CliArgs::parse(raw).unwrap();
+        assert_eq!(args.samples, 1);
+        assert_eq!(args.temperature, 0.0);
+    }
+
+    struct CyclingAdapter {
+        idx: std::cell::Cell<usize>,
+    }
+
+    impl CyclingAdapter {
+        fn new() -> Self {
+            Self {
+                idx: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl ProviderAdapter for CyclingAdapter {
+        fn is_local_available(&self) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        fn generate(&self, _req: &GenerateRequest) -> Result<GenerateResponse, ProviderError> {
+            let i = self.idx.get();
+            self.idx.set(i + 1);
+            let text = match i {
+                0 => "ls -la",
+                1 => "ls -la",
+                _ => "pwd",
+            };
+            Ok(GenerateResponse {
+                text: text.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn run_uses_majority_vote_when_samples_gt_1() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "list files".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: false,
+            samples: 3,
+            temperature: 0.3,
+        };
+
+        let adapter = CyclingAdapter::new();
+        let out = run(&args, &adapter).unwrap();
+        assert_eq!(out, "ls -la");
+    }
+
+    #[test]
     fn run_explain_mode_skips_command_validation() {
         let args = CliArgs {
             model: "llama3.2".to_string(),
@@ -439,6 +565,8 @@ mod tests {
             bank_path: None,
             notfound: false,
             explain: true,
+            samples: 1,
+            temperature: 0.0,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();

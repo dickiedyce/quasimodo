@@ -28,6 +28,7 @@ fn ollama_generate_returns_non_empty_text() {
     let req = GenerateRequest {
         model: "llama3.2".to_string(),
         prompt: "Reply with only the word pong.".to_string(),
+        temperature: 0.0,
     };
 
     let response = adapter.generate(&req).unwrap();
