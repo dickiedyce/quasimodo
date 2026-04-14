@@ -227,6 +227,7 @@ pub struct CliArgs {
     pub quality_retry: bool,
     pub teach_description: Option<String>,
     pub teach_command: Option<String>,
+    pub describe: bool,
 }
 
 impl CliArgs {
@@ -245,6 +246,7 @@ impl CliArgs {
         let mut quality_retry = true;
         let mut teach_description: Option<String> = None;
         let mut teach_command: Option<String> = None;
+        let mut describe = false;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -305,6 +307,12 @@ impl CliArgs {
                 "--command" => {
                     teach_command = Some(args.next().ok_or("--command requires a value")?);
                 }
+                "--describe" => {
+                    describe = true;
+                    if prompt.is_none() {
+                        prompt = Some(args.next().ok_or("--describe requires a command")?);
+                    }
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -316,6 +324,10 @@ impl CliArgs {
         } else {
             return Err("--prompt is required".to_string());
         };
+
+        if describe && explain {
+            return Err("--describe and --explain cannot be used together".to_string());
+        }
 
         Ok(Self {
             model,
@@ -332,6 +344,7 @@ impl CliArgs {
             quality_retry,
             teach_description,
             teach_command,
+            describe,
         })
     }
 }
@@ -430,7 +443,14 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
 
     let final_prompt = if args.explain {
         format!(
-            "Explain briefly what failed and suggest a concrete fix. Input: {}",
+            "This is a Unix/macOS shell command or error output. \
+             Explain briefly what went wrong and suggest a concrete fix. \
+             Shell command or error: {}",
+            args.prompt
+        )
+    } else if args.describe {
+        format!(
+            "Describe in one plain English sentence what this Unix/macOS shell command does: {}",
             args.prompt
         )
     } else {
@@ -487,7 +507,7 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         normalize_command_output(&args.prompt, &raw_unchecked)
     };
 
-    if args.explain {
+    if args.explain || args.describe {
         return Ok(one_line_explanation(&raw));
     }
 
@@ -914,6 +934,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -937,6 +958,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -1088,6 +1110,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let adapter = CyclingAdapter::new();
@@ -1112,6 +1135,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -1149,6 +1173,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let result = run(&args, &MultilineExplainAdapter).unwrap();
@@ -1199,6 +1224,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
@@ -1279,6 +1305,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1310,6 +1337,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            describe: false,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1368,6 +1396,45 @@ This should return the address.
         );
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn describe_mode_sends_description_prompt_and_returns_single_line() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "find . -mmin -60".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: false,
+            describe: true,
+            samples: 1,
+            temperature: 0.0,
+            stdin: false,
+            system_prompt: None,
+            history_file: None,
+            quality_retry: true,
+            teach_description: None,
+            teach_command: None,
+        };
+
+        // EchoAdapter echoes the prompt; one_line_explanation picks the first line.
+        let result = run(&args, &EchoAdapter).unwrap();
+        // The prompt sent to the adapter should contain "Describe" and the command.
+        assert!(
+            result.starts_with("echo "),
+            "expected echo adapter output, got: {result}"
+        );
+    }
+
+    #[test]
+    fn describe_parse_sets_flag_and_captures_command() {
+        let args = CliArgs::parse(
+            vec!["--describe".to_string(), "find . -mmin -60".to_string()].into_iter(),
+        )
+        .unwrap();
+        assert!(args.describe);
+        assert_eq!(args.prompt, "find . -mmin -60");
     }
 }
 

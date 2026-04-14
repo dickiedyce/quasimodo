@@ -40,6 +40,7 @@ fn main() {
     eprintln!("Parsed {} entries", entries.len());
 
     let bank = Bank::open(&db_path).expect("failed to open database");
+    bank.clear_entries().expect("failed to clear existing entries");
     bank.insert_batch(&entries).expect("failed to insert entries");
     eprintln!("Written to {db_path}");
 }

@@ -216,6 +216,7 @@ fn run_one(adapter: &OllamaAdapter, prompt: &str, bank_path: Option<String>, ret
         quality_retry: retry,
         teach_description: None,
         teach_command: None,
+        describe: false,
     };
 
     match run(&args, adapter) {

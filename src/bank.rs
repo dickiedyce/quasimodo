@@ -42,6 +42,11 @@ impl Bank {
         Ok(())
     }
 
+    /// Delete all TLDR entries. Does not touch user_examples.
+    pub fn clear_entries(&self) -> SqlResult<()> {
+        self.conn.execute_batch("DELETE FROM entries;")
+    }
+
     pub fn insert_batch(&self, entries: &[BankEntry]) -> SqlResult<()> {
         for entry in entries {
             self.insert(entry)?;
@@ -155,15 +160,24 @@ mod tests {
     }
 
     #[test]
-    fn teach_survives_bank_rebuild_if_separate_path() {
-        // Verifies that user_examples table exists independently of entries
+    fn teach_survives_clear_entries() {
         let bank = Bank::open_in_memory().unwrap();
+
+        bank.insert(&BankEntry {
+            description: "list files".to_string(),
+            command: "ls".to_string(),
+        }).unwrap();
         bank.teach("show date", "date").unwrap();
-        // Simulate a rebuild clearing only entries
-        bank.conn.execute_batch(
-            "DELETE FROM entries;"
-        ).unwrap();
-        let results = bank.search("show date", 5).unwrap();
-        assert!(!results.is_empty(), "user examples should survive entries rebuild");
+
+        bank.clear_entries().unwrap();
+
+        // TLDR entry is gone
+        let tldr = bank.search("list files", 5).unwrap();
+        assert!(tldr.is_empty(), "entries should be cleared");
+
+        // User example survives
+        let user = bank.search("show date", 5).unwrap();
+        assert!(!user.is_empty(), "user examples should survive clear_entries");
+        assert_eq!(user[0].command, "date");
     }
 }

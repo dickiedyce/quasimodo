@@ -34,6 +34,10 @@ maybe_add() {
 QQ_BLOCK='# quasimodo: query
 qq() { quasimodo --prompt "$*" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"; }'
 
+# qd  -- describe: explain what a shell command does
+QD_BLOCK='# quasimodo: describe
+qd() { quasimodo --describe "$*" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"; }'
+
 # qe  -- explain: describe what a failed command did wrong
 QE_BLOCK='# quasimodo: explain
 qe() { quasimodo --explain "$*" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"; }'
@@ -66,6 +70,7 @@ qb() {
 # ── apply ─────────────────────────────────────────────────────────────────────
 
 maybe_add "# quasimodo: query"     "$QQ_BLOCK"  "qq  (query)"
+maybe_add "# quasimodo: describe"  "$QD_BLOCK"  "qd  (describe)"
 maybe_add "# quasimodo: explain"   "$QE_BLOCK"  "qe  (explain)"
 maybe_add "# quasimodo: teach"     "$QT_BLOCK"  "qt  (teach)"
 maybe_add "# quasimodo: not-found" "$QNF_BLOCK" "qnf (not-found lookup)"
