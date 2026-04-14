@@ -139,8 +139,13 @@ const CASES: &[Case] = &[
     },
     Case {
         category: Category::MacOs,
-        prompt: "resize image to 800x600 on mac",
-        expected_prefixes: &["sips"],
+        prompt: "resize png image to 800x600 on mac",
+        expected_prefixes: &["sips", "convert", "magick"],
+    },
+    Case {
+        category: Category::MacOs,
+        prompt: "resize svg image to 800x600 on mac",
+        expected_prefixes: &["convert", "magick", "rsvg-convert"],
     },
     Case {
         category: Category::MacOs,
