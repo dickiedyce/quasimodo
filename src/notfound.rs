@@ -5,7 +5,7 @@
 ///   2. Installable: static map of common tools → brew formula
 ///   3. Linux→macOS: static map of Linux commands → macOS equivalents
 
-use crate::bank::{Bank, BankEntry};
+use crate::bank::Bank;
 
 // Static map of installable tools → Homebrew formula (subset, extend as needed)
 const BREW_MAP: &[(&str, &str)] = &[
@@ -83,7 +83,7 @@ pub enum NotFoundSuggestion {
     Unknown,
 }
 
-pub fn suggest_not_found(command: &str, bank: Option<&Bank>) -> NotFoundSuggestion {
+pub fn suggest_not_found(command: &str, _bank: Option<&Bank>) -> NotFoundSuggestion {
     // 1. Linux→macOS exact match
     if let Some((_, macos)) = LINUX_TO_MACOS.iter().find(|(linux, _)| *linux == command) {
         return NotFoundSuggestion::MacOsEquivalent(macos.to_string());

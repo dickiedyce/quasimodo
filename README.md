@@ -30,6 +30,33 @@ Typical local workflow:
 2. Ensure your selected model is available in Ollama.
 3. Use `OllamaAdapter::new("http://localhost:11434")` and call `generate` with a `GenerateRequest`.
 
+## CLI Usage
+
+```bash
+# Command generation from plain English
+cargo run -- --prompt "find files changed in the last hour" --bank ./tldr_bank.db
+
+# Command-not-found helper mode
+cargo run -- --notfound ip --bank ./tldr_bank.db
+
+# Error explanation helper mode
+cargo run -- --explain "Command: git push -- Exit code: 128"
+```
+
+## zsh Hooks
+
+```bash
+export QUASIMODO_BIN="$PWD/target/debug/quasimodo"
+export QUASIMODO_BANK="$PWD/tldr_bank.db"
+source "$PWD/hooks/quasimodo.zsh"
+```
+
+This enables:
+
+1. `Ctrl+G` to rewrite natural language in your shell buffer into a command.
+2. `command_not_found_handler` suggestions via `--notfound`.
+3. `TRAPZERR` one-line explanations via `--explain`.
+
 ## Design Notes
 
 - Local-only endpoint validation is enforced (localhost / 127.0.0.1).

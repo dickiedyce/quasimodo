@@ -5,7 +5,9 @@ fn main() {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("error: {msg}");
-            eprintln!("usage: quasimodo --prompt <text> [--model <name>] [--endpoint <url>] [--bank <path>]");
+            eprintln!(
+                "usage: quasimodo (--prompt <text> | --notfound <cmd> | --explain <context>) [--model <name>] [--endpoint <url>] [--bank <path>]"
+            );
             std::process::exit(1);
         }
     };

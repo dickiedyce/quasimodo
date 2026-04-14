@@ -118,6 +118,7 @@ pub struct CliArgs {
     pub prompt: String,
     pub bank_path: Option<String>,
     pub notfound: bool,
+    pub explain: bool,
 }
 
 impl CliArgs {
@@ -127,6 +128,7 @@ impl CliArgs {
         let mut prompt: Option<String> = None;
         let mut bank_path: Option<String> = None;
         let mut notfound = false;
+        let mut explain = false;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -149,6 +151,12 @@ impl CliArgs {
                         prompt = Some(args.next().ok_or("--notfound requires a command name")?);
                     }
                 }
+                "--explain" => {
+                    explain = true;
+                    if prompt.is_none() {
+                        prompt = Some(args.next().ok_or("--explain requires a value")?);
+                    }
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
@@ -159,6 +167,7 @@ impl CliArgs {
             prompt: prompt.ok_or("--prompt is required")?,
             bank_path,
             notfound,
+            explain,
         })
     }
 }
@@ -204,12 +213,22 @@ pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, Prov
         None => args.prompt.clone(),
     };
 
+    let final_prompt = if args.explain {
+        format!("Explain briefly what failed and suggest a concrete fix. Input: {full_prompt}")
+    } else {
+        full_prompt
+    };
+
     let req = GenerateRequest {
         model: args.model.clone(),
-        prompt: full_prompt,
+        prompt: final_prompt,
     };
 
     let raw = adapter.generate(&req).map(|r| strip_markdown(&r.text))?;
+
+    if args.explain {
+        return Ok(raw);
+    }
 
     // Command existence validation: retry once if the binary doesn't exist.
     if !command_exists(command_name(&raw)) {
@@ -346,6 +365,7 @@ mod tests {
             prompt: "hello".to_string(),
             bank_path: None,
             notfound: false,
+            explain: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -360,6 +380,7 @@ mod tests {
             prompt: "hello".to_string(),
             bank_path: None,
             notfound: false,
+            explain: false,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -371,6 +392,7 @@ mod tests {
             "--model", "llama3.2",
             "--prompt", "hello world",
             "--endpoint", "http://localhost:11434",
+            "--bank", "./tldr_bank.db",
         ]
         .iter()
         .map(|s| s.to_string());
@@ -379,6 +401,7 @@ mod tests {
         assert_eq!(args.model, "llama3.2");
         assert_eq!(args.prompt, "hello world");
         assert_eq!(args.endpoint, "http://localhost:11434");
+        assert_eq!(args.bank_path.as_deref(), Some("./tldr_bank.db"));
     }
 
     #[test]
@@ -394,6 +417,32 @@ mod tests {
     fn cli_args_fails_without_prompt() {
         let raw = ["--model", "llama3.2"].iter().map(|s| s.to_string());
         assert!(CliArgs::parse(raw).is_err());
+    }
+
+    #[test]
+    fn cli_args_parse_explain_mode() {
+        let raw = ["--explain", "Command: git push -- Exit code: 128"]
+            .iter()
+            .map(|s| s.to_string());
+
+        let args = CliArgs::parse(raw).unwrap();
+        assert!(args.explain);
+        assert_eq!(args.prompt, "Command: git push -- Exit code: 128");
+    }
+
+    #[test]
+    fn run_explain_mode_skips_command_validation() {
+        let args = CliArgs {
+            model: "llama3.2".to_string(),
+            endpoint: "http://localhost:11434".to_string(),
+            prompt: "Command: git push -- Exit code: 128".to_string(),
+            bank_path: None,
+            notfound: false,
+            explain: true,
+        };
+
+        let result = run(&args, &EchoAdapter).unwrap();
+        assert!(result.starts_with("echo "));
     }
 }
 
