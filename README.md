@@ -78,6 +78,9 @@ quasimodo --teach "date 90 days ago" \
           --command "date -v -90d '+%Y-%m-%d'" \
           --bank "$HOME/.quasimodo/tldr_bank.db"
 
+# List all taught examples
+quasimodo --list-taught --bank "$HOME/.quasimodo/tldr_bank.db"
+
 # Quality benchmark (A/B: no-retry vs retry)
 cargo run --bin quality_benchmark -- "$HOME/.quasimodo/tldr_bank.db"
 ```
@@ -93,6 +96,14 @@ quasimodo --teach "<natural language description>" \
 ```
 
 User-taught examples are stored in a separate `user_examples` table and always ranked above TLDR entries in retrieval. They survive `build-bank` rebuilds.
+
+To inspect all stored user-taught examples:
+
+```bash
+quasimodo --list-taught --bank "$HOME/.quasimodo/tldr_bank.db"
+```
+
+Output format is one tab-separated line per entry: `<description><TAB><command>`.
 
 Retrieval precedence is now three-tier:
 

@@ -228,6 +228,7 @@ pub struct CliArgs {
     pub teach_description: Option<String>,
     pub teach_command: Option<String>,
     pub describe: bool,
+    pub list_taught: bool,
 }
 
 impl CliArgs {
@@ -247,6 +248,7 @@ impl CliArgs {
         let mut teach_description: Option<String> = None;
         let mut teach_command: Option<String> = None;
         let mut describe = false;
+        let mut list_taught = false;
 
         while let Some(flag) = args.next() {
             match flag.as_str() {
@@ -313,13 +315,16 @@ impl CliArgs {
                         prompt = Some(args.next().ok_or("--describe requires a command")?);
                     }
                 }
+                "--list-taught" => {
+                    list_taught = true;
+                }
                 other => return Err(format!("unknown flag: {other}")),
             }
         }
 
         let prompt = if let Some(prompt) = prompt {
             prompt
-        } else if stdin || teach_description.is_some() {
+        } else if stdin || teach_description.is_some() || list_taught {
             String::new()
         } else {
             return Err("--prompt is required".to_string());
@@ -345,6 +350,7 @@ impl CliArgs {
             teach_description,
             teach_command,
             describe,
+            list_taught,
         })
     }
 }
@@ -374,6 +380,19 @@ fn save_history(path: &str, messages: &[ChatMessage]) -> Result<(), ProviderErro
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
+    if args.list_taught {
+        let bank_path = args
+            .bank_path
+            .as_deref()
+            .ok_or_else(|| ProviderError::InvalidConfig("--list-taught requires --bank".to_string()))?;
+        let bank = Bank::open(bank_path)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let taught = bank
+            .list_taught()
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        return Ok(format_taught_entries(&taught));
+    }
+
     // --teach mode: store a user-provided example in the bank; no LLM call needed.
     if let Some(ref description) = args.teach_description {
         let command = args
@@ -785,6 +804,14 @@ fn retry_guidance(prompt: &str) -> &'static str {
     }
 }
 
+fn format_taught_entries(entries: &[bank::BankEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("{}\t{}", entry.description, entry.command))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,6 +962,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -959,6 +987,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         assert!(matches!(run(&args, &UnavailableAdapter), Err(ProviderError::Unavailable)));
@@ -1111,6 +1140,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let adapter = CyclingAdapter::new();
@@ -1136,6 +1166,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let result = run(&args, &EchoAdapter).unwrap();
@@ -1174,6 +1205,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let result = run(&args, &MultilineExplainAdapter).unwrap();
@@ -1225,6 +1257,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let out = run(&args, &LowThenBetterAdapter::new()).unwrap();
@@ -1306,6 +1339,7 @@ This should return the address.
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1338,6 +1372,7 @@ This should return the address.
             teach_description: None,
             teach_command: None,
             describe: false,
+            list_taught: false,
         };
 
         let out = run(&args, &ChatOnlyAdapter).unwrap();
@@ -1416,6 +1451,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            list_taught: false,
         };
 
         // EchoAdapter echoes the prompt; one_line_explanation picks the first line.
@@ -1435,6 +1471,51 @@ This should return the address.
         .unwrap();
         assert!(args.describe);
         assert_eq!(args.prompt, "find . -mmin -60");
+    }
+
+    #[test]
+    fn list_taught_parse_sets_flag_without_prompt() {
+        let args = CliArgs::parse(
+            vec!["--list-taught".to_string(), "--bank".to_string(), "./bank.db".to_string()]
+                .into_iter(),
+        )
+        .unwrap();
+
+        assert!(args.list_taught);
+        assert_eq!(args.bank_path.as_deref(), Some("./bank.db"));
+        assert_eq!(args.prompt, "");
+    }
+
+    #[test]
+    fn list_taught_via_cli_returns_all_taught_entries() {
+        use crate::bank::Bank;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-list-taught-{now}.db"));
+        let db_path = path.to_string_lossy().to_string();
+
+        let bank = Bank::open(&db_path).unwrap();
+        bank.teach("show date", "date").unwrap();
+        bank.teach("list files", "ls -la").unwrap();
+
+        let args = CliArgs::parse(
+            vec![
+                "--list-taught".to_string(),
+                "--bank".to_string(),
+                db_path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let result = run(&args, &EchoAdapter).unwrap();
+        assert_eq!(result, "list files\tls -la\nshow date\tdate");
+
+        let _ = std::fs::remove_file(path);
     }
 }
 

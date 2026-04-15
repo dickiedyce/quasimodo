@@ -110,6 +110,25 @@ impl Bank {
         Ok(())
     }
 
+    pub fn list_taught(&self) -> SqlResult<Vec<BankEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT description, command FROM user_examples
+             ORDER BY description ASC, command ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(BankEntry {
+                description: row.get(0)?,
+                command: row.get(1)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> SqlResult<Vec<BankEntry>> {
         // User overrides come first, then macOS entries, then common entries.
         let mut results: Vec<BankEntry> = Vec::new();
@@ -281,5 +300,20 @@ mod tests {
         assert_eq!(results[0].command, "date -v -90d '+%Y-%m-%d'");
         assert_eq!(results[1].command, "date -v -90d '+%Y-%m-%d'");
         assert_eq!(results[2].command, "date -d '-90 days' '+%Y-%m-%d'");
+    }
+
+    #[test]
+    fn list_taught_returns_all_user_examples_in_description_order() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        bank.teach("show date", "date").unwrap();
+        bank.teach("list files", "ls -la").unwrap();
+
+        let taught = bank.list_taught().unwrap();
+        assert_eq!(taught.len(), 2);
+        assert_eq!(taught[0].description, "list files");
+        assert_eq!(taught[0].command, "ls -la");
+        assert_eq!(taught[1].description, "show date");
+        assert_eq!(taught[1].command, "date");
     }
 }
