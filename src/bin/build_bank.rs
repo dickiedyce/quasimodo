@@ -36,25 +36,41 @@ fn main() {
         });
 
     eprintln!("Parsing tldr pages from {:?} …", tldr_dir);
-    let entries = parse_tldr_dir(&tldr_dir);
-    eprintln!("Parsed {} entries", entries.len());
+    let (macos_entries, common_entries) = parse_tldr_dir(&tldr_dir);
+    eprintln!(
+        "Parsed {} macOS entries and {} common entries",
+        macos_entries.len(),
+        common_entries.len()
+    );
 
     let bank = Bank::open(&db_path).expect("failed to open database");
     bank.clear_entries().expect("failed to clear existing entries");
-    bank.insert_batch(&entries).expect("failed to insert entries");
+    bank.insert_batch_macos(&macos_entries)
+        .expect("failed to insert macOS entries");
+    bank.insert_batch_common(&common_entries)
+        .expect("failed to insert common entries");
     eprintln!("Written to {db_path}");
 }
 
 /// Walk a tldr-pages directory tree and parse every .md file into BankEntry pairs.
-fn parse_tldr_dir(root: &Path) -> Vec<BankEntry> {
-    let mut entries = Vec::new();
+fn parse_tldr_dir(root: &Path) -> (Vec<BankEntry>, Vec<BankEntry>) {
+    let mut macos_entries = Vec::new();
+    let mut common_entries = Vec::new();
+
     for md_file in find_md_files(root) {
         let Ok(text) = fs::read_to_string(&md_file) else {
             continue;
         };
-        entries.extend(parse_tldr_page(&text));
+
+        let parsed = parse_tldr_page(&text);
+        match tier_for_path(&md_file) {
+            EntryTier::MacOs => macos_entries.extend(parsed),
+            EntryTier::Common => common_entries.extend(parsed),
+            EntryTier::Ignore => {}
+        }
     }
-    entries
+
+    (macos_entries, common_entries)
 }
 
 fn find_md_files(root: &Path) -> Vec<PathBuf> {
@@ -70,6 +86,24 @@ fn find_md_files(root: &Path) -> Vec<PathBuf> {
         }
     }
     results
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryTier {
+    MacOs,
+    Common,
+    Ignore,
+}
+
+fn tier_for_path(path: &Path) -> EntryTier {
+    let norm = path.to_string_lossy().replace('\\', "/");
+    if norm.contains("/pages/osx/") {
+        EntryTier::MacOs
+    } else if norm.contains("/pages/common/") {
+        EntryTier::Common
+    } else {
+        EntryTier::Ignore
+    }
 }
 
 /// Parse a single tldr page markdown source into BankEntry items.
@@ -106,7 +140,8 @@ fn parse_tldr_page(text: &str) -> Vec<BankEntry> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_tldr_page;
+    use super::{EntryTier, parse_tldr_page, tier_for_path};
+    use std::path::Path;
 
     #[test]
     fn parses_description_and_command_pairs() {
@@ -130,5 +165,23 @@ mod tests {
         let entries = parse_tldr_page(page);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command, "proper");
+    }
+
+    #[test]
+    fn tiers_osx_pages_as_macos() {
+        let path = Path::new("/tmp/tldr/pages/osx/date.md");
+        assert_eq!(tier_for_path(path), EntryTier::MacOs);
+    }
+
+    #[test]
+    fn tiers_common_pages_as_common() {
+        let path = Path::new("/tmp/tldr/pages/common/find.md");
+        assert_eq!(tier_for_path(path), EntryTier::Common);
+    }
+
+    #[test]
+    fn ignores_non_macos_non_common_paths() {
+        let path = Path::new("/tmp/tldr/pages/linux/ip.md");
+        assert_eq!(tier_for_path(path), EntryTier::Ignore);
     }
 }

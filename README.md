@@ -94,6 +94,14 @@ quasimodo --teach "<natural language description>" \
 
 User-taught examples are stored in a separate `user_examples` table and always ranked above TLDR entries in retrieval. They survive `build-bank` rebuilds.
 
+Retrieval precedence is now three-tier:
+
+1. User overrides (`--teach` examples)
+2. macOS TLDR examples (`pages/osx`)
+3. Common TLDR examples (`pages/common`)
+
+`build-bank` ingests only `pages/osx` and `pages/common` so Linux-only commands do not outrank macOS-native commands.
+
 Example — macOS `date` arithmetic:
 
 ```bash
@@ -117,6 +125,7 @@ Add the following lines to your `~/.zshrc` so hooks load automatically in every 
 # optional:
 # export QUASIMODO_SYSTEM="Return only shell commands"
 # export QUASIMODO_HISTORY="$HOME/.quasimodo/session.json"
+# export QUASIMODO_TRAP_ERRORS="1"
 # export QUASIMODO_KEY="^]"
 # export QUASIMODO_ALT_KEY=""
 source "$HOME/.quasimodo/hooks/quasimodo.zsh"
@@ -147,6 +156,13 @@ This enables:
 1. `Ctrl+]` (or your configured key) rewrites natural language in your shell buffer into a command.
 2. `command_not_found_handler` suggestions via `--notfound`.
 3. `TRAPZERR` one-line explanations via `--explain`.
+
+To disable error trapping/explanations while keeping other hooks enabled:
+
+```bash
+export QUASIMODO_TRAP_ERRORS="0"
+source "$HOME/.quasimodo/hooks/quasimodo.zsh"
+```
 
 If your key binding does not trigger, run this quick check:
 

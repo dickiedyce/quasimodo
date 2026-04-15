@@ -15,6 +15,7 @@
 : "${QUASIMODO_HISTORY:=}"
 : "${QUASIMODO_KEY:=^G}"
 : "${QUASIMODO_ALT_KEY:=^X^G}"
+: "${QUASIMODO_TRAP_ERRORS:=1}"
 
 typeset -gi _QUASIMODO_IN_ZERR=0
 
@@ -101,6 +102,9 @@ TRAPZERR() {
   emulate -L zsh
   setopt localoptions nomonitor nonotify
   unsetopt xtrace
+
+  # Allow users to disable quasimodo error explanations while keeping other hooks.
+  [[ "$QUASIMODO_TRAP_ERRORS" == "0" ]] && return 0
 
   local code="$?"
   if (( _QUASIMODO_IN_ZERR )); then
