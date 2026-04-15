@@ -227,6 +227,7 @@ pub struct CliArgs {
     pub quality_retry: bool,
     pub teach_description: Option<String>,
     pub teach_command: Option<String>,
+    pub delete_taught: Option<String>,
     pub describe: bool,
     pub list_taught: bool,
 }
@@ -247,6 +248,7 @@ impl CliArgs {
         let mut quality_retry = true;
         let mut teach_description: Option<String> = None;
         let mut teach_command: Option<String> = None;
+        let mut delete_taught: Option<String> = None;
         let mut describe = false;
         let mut list_taught = false;
 
@@ -309,6 +311,9 @@ impl CliArgs {
                 "--command" => {
                     teach_command = Some(args.next().ok_or("--command requires a value")?);
                 }
+                "--delete-taught" => {
+                    delete_taught = Some(args.next().ok_or("--delete-taught requires a value")?);
+                }
                 "--describe" => {
                     describe = true;
                     if prompt.is_none() {
@@ -324,7 +329,7 @@ impl CliArgs {
 
         let prompt = if let Some(prompt) = prompt {
             prompt
-        } else if stdin || teach_description.is_some() || list_taught {
+        } else if stdin || teach_description.is_some() || delete_taught.is_some() || list_taught {
             String::new()
         } else {
             return Err("--prompt is required".to_string());
@@ -349,6 +354,7 @@ impl CliArgs {
             quality_retry,
             teach_description,
             teach_command,
+            delete_taught,
             describe,
             list_taught,
         })
@@ -380,6 +386,27 @@ fn save_history(path: &str, messages: &[ChatMessage]) -> Result<(), ProviderErro
 }
 
 pub fn run(args: &CliArgs, adapter: &dyn ProviderAdapter) -> Result<String, ProviderError> {
+    if let Some(ref description_substring) = args.delete_taught {
+        let bank_path = args
+            .bank_path
+            .as_deref()
+            .ok_or_else(|| ProviderError::InvalidConfig("--delete-taught requires --bank".to_string()))?;
+        let bank = Bank::open(bank_path)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        let deleted = bank
+            .delete_taught(description_substring)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        let deleted = deleted.ok_or_else(|| {
+            ProviderError::InvalidConfig(format!("no taught entry matched: {description_substring}"))
+        })?;
+
+        return Ok(format!(
+            "deleted taught entry: {} -> {}",
+            deleted.description, deleted.command
+        ));
+    }
+
     if args.list_taught {
         let bank_path = args
             .bank_path
@@ -961,6 +988,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -986,6 +1014,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1139,6 +1168,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1165,6 +1195,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1204,6 +1235,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1256,6 +1288,7 @@ mod tests {
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1338,6 +1371,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1371,6 +1405,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             describe: false,
             list_taught: false,
         };
@@ -1451,6 +1486,7 @@ This should return the address.
             quality_retry: true,
             teach_description: None,
             teach_command: None,
+            delete_taught: None,
             list_taught: false,
         };
 
@@ -1514,6 +1550,100 @@ This should return the address.
 
         let result = run(&args, &EchoAdapter).unwrap();
         assert_eq!(result, "list files\tls -la\nshow date\tdate");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_taught_parse_captures_substring_without_prompt() {
+        let args = CliArgs::parse(
+            vec![
+                "--delete-taught".to_string(),
+                "90 days".to_string(),
+                "--bank".to_string(),
+                "./bank.db".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(args.delete_taught.as_deref(), Some("90 days"));
+        assert_eq!(args.bank_path.as_deref(), Some("./bank.db"));
+        assert_eq!(args.prompt, "");
+    }
+
+    #[test]
+    fn delete_taught_via_cli_removes_matching_entry_and_returns_confirmation() {
+        use crate::bank::Bank;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-delete-taught-{now}.db"));
+        let db_path = path.to_string_lossy().to_string();
+
+        let bank = Bank::open(&db_path).unwrap();
+        bank.teach("date 90 days ago", "date -v -90d '+%Y-%m-%d'")
+            .unwrap();
+        bank.teach("show date", "date").unwrap();
+
+        let args = CliArgs::parse(
+            vec![
+                "--delete-taught".to_string(),
+                "90 days".to_string(),
+                "--bank".to_string(),
+                db_path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let result = run(&args, &EchoAdapter).unwrap();
+        assert_eq!(
+            result,
+            "deleted taught entry: date 90 days ago -> date -v -90d '+%Y-%m-%d'"
+        );
+
+        let taught = bank.list_taught().unwrap();
+        assert_eq!(taught.len(), 1);
+        assert_eq!(taught[0].description, "show date");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_taught_via_cli_errors_when_no_entry_matches() {
+        use crate::bank::Bank;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-delete-taught-miss-{now}.db"));
+        let db_path = path.to_string_lossy().to_string();
+
+        let bank = Bank::open(&db_path).unwrap();
+        bank.teach("show date", "date").unwrap();
+
+        let args = CliArgs::parse(
+            vec![
+                "--delete-taught".to_string(),
+                "90 days".to_string(),
+                "--bank".to_string(),
+                db_path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let err = run(&args, &EchoAdapter).unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderError::InvalidConfig(ref msg) if msg == "no taught entry matched: 90 days"
+        ));
 
         let _ = std::fs::remove_file(path);
     }

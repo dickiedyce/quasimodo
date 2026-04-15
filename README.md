@@ -81,6 +81,9 @@ quasimodo --teach "date 90 days ago" \
 # List all taught examples
 quasimodo --list-taught --bank "$HOME/.quasimodo/tldr_bank.db"
 
+# Delete the first taught example whose description matches a substring
+quasimodo --delete-taught "90 days" --bank "$HOME/.quasimodo/tldr_bank.db"
+
 # Quality benchmark (A/B: no-retry vs retry)
 cargo run --bin quality_benchmark -- "$HOME/.quasimodo/tldr_bank.db"
 ```
@@ -104,6 +107,12 @@ quasimodo --list-taught --bank "$HOME/.quasimodo/tldr_bank.db"
 ```
 
 Output format is one tab-separated line per entry: `<description><TAB><command>`.
+
+To remove a stored user-taught example, pass a description substring. The first matching entry in description order is deleted:
+
+```bash
+quasimodo --delete-taught "90 days" --bank "$HOME/.quasimodo/tldr_bank.db"
+```
 
 Retrieval precedence is now three-tier:
 

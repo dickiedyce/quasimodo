@@ -129,6 +129,31 @@ impl Bank {
         Ok(results)
     }
 
+    pub fn delete_taught(&self, description_substring: &str) -> SqlResult<Option<BankEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid, description, command FROM user_examples
+             WHERE instr(lower(description), lower(?1)) > 0
+             ORDER BY description ASC, command ASC
+             LIMIT 1",
+        )?;
+
+        let mut rows = stmt.query(params![description_substring])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+
+        let rowid: i64 = row.get(0)?;
+        let deleted = BankEntry {
+            description: row.get(1)?,
+            command: row.get(2)?,
+        };
+
+        self.conn
+            .execute("DELETE FROM user_examples WHERE rowid = ?1", params![rowid])?;
+
+        Ok(Some(deleted))
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> SqlResult<Vec<BankEntry>> {
         // User overrides come first, then macOS entries, then common entries.
         let mut results: Vec<BankEntry> = Vec::new();
@@ -315,5 +340,32 @@ mod tests {
         assert_eq!(taught[0].command, "ls -la");
         assert_eq!(taught[1].description, "show date");
         assert_eq!(taught[1].command, "date");
+    }
+
+    #[test]
+    fn delete_taught_removes_first_matching_description_substring() {
+        let bank = Bank::open_in_memory().unwrap();
+
+        bank.teach("date 90 days ago", "date -v -90d '+%Y-%m-%d'")
+            .unwrap();
+        bank.teach("date in 3 weeks", "date -v +3w '+%Y-%m-%d'")
+            .unwrap();
+
+        let deleted = bank.delete_taught("90 days").unwrap().unwrap();
+        assert_eq!(deleted.description, "date 90 days ago");
+
+        let taught = bank.list_taught().unwrap();
+        assert_eq!(taught.len(), 1);
+        assert_eq!(taught[0].description, "date in 3 weeks");
+    }
+
+    #[test]
+    fn delete_taught_returns_none_when_no_description_matches() {
+        let bank = Bank::open_in_memory().unwrap();
+        bank.teach("show date", "date").unwrap();
+
+        let deleted = bank.delete_taught("not there").unwrap();
+        assert!(deleted.is_none());
+        assert_eq!(bank.list_taught().unwrap().len(), 1);
     }
 }
