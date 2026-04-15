@@ -1,6 +1,6 @@
 # quasimodo
 
-Native macOS-first Rust implementation inspired by hunch, with a local-first LLM provider boundary.
+Native macOS-first Rust implementation inspired by [hunch](https://github.com/es617/hunch), with a local-first LLM provider boundary.
 
 ## Requirements
 
