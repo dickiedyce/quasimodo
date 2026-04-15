@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 
+pub fn usage_text() -> &'static str {
+    "usage: quasimodo (--help | --prompt <text> | --stdin | --notfound <cmd> | --explain <context> | --describe <cmd> | --teach <text> --command <cmd> | --list-taught | --delete-taught <text>) [--model <name>] [--endpoint <url>] [--bank <path>] [--samples <n>] [--temperature <f>] [--system <text>] [--history-file <path>] [--no-quality-retry]"
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerateRequest {
     pub model: String,
@@ -228,6 +232,7 @@ pub struct CliArgs {
     pub teach_description: Option<String>,
     pub teach_command: Option<String>,
     pub delete_taught: Option<String>,
+    pub help: bool,
     pub describe: bool,
     pub list_taught: bool,
 }
@@ -249,6 +254,7 @@ impl CliArgs {
         let mut teach_description: Option<String> = None;
         let mut teach_command: Option<String> = None;
         let mut delete_taught: Option<String> = None;
+        let mut help = false;
         let mut describe = false;
         let mut list_taught = false;
 
@@ -314,6 +320,9 @@ impl CliArgs {
                 "--delete-taught" => {
                     delete_taught = Some(args.next().ok_or("--delete-taught requires a value")?);
                 }
+                "--help" | "-h" => {
+                    help = true;
+                }
                 "--describe" => {
                     describe = true;
                     if prompt.is_none() {
@@ -329,7 +338,12 @@ impl CliArgs {
 
         let prompt = if let Some(prompt) = prompt {
             prompt
-        } else if stdin || teach_description.is_some() || delete_taught.is_some() || list_taught {
+        } else if help
+            || stdin
+            || teach_description.is_some()
+            || delete_taught.is_some()
+            || list_taught
+        {
             String::new()
         } else {
             return Err("--prompt is required".to_string());
@@ -355,6 +369,7 @@ impl CliArgs {
             teach_description,
             teach_command,
             delete_taught,
+            help,
             describe,
             list_taught,
         })
@@ -989,6 +1004,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1015,6 +1031,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1169,6 +1186,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1196,6 +1214,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1236,6 +1255,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1289,6 +1309,7 @@ mod tests {
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1372,6 +1393,7 @@ This should return the address.
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1406,6 +1428,7 @@ This should return the address.
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             describe: false,
             list_taught: false,
         };
@@ -1487,6 +1510,7 @@ This should return the address.
             teach_description: None,
             teach_command: None,
             delete_taught: None,
+            help: false,
             list_taught: false,
         };
 
@@ -1552,6 +1576,19 @@ This should return the address.
         assert_eq!(result, "list files\tls -la\nshow date\tdate");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn help_parse_sets_flag_without_prompt() {
+        let args = CliArgs::parse(vec!["--help".to_string()].into_iter()).unwrap();
+
+        assert!(args.help);
+        assert_eq!(args.prompt, "");
+    }
+
+    #[test]
+    fn usage_text_mentions_help_mode() {
+        assert!(usage_text().contains("--help"));
     }
 
     #[test]

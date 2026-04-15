@@ -1,16 +1,19 @@
-use quasimodo::{CliArgs, OllamaAdapter, run};
+use quasimodo::{CliArgs, OllamaAdapter, run, usage_text};
 
 fn main() {
     let mut args = match CliArgs::parse(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("error: {msg}");
-            eprintln!(
-                "usage: quasimodo (--prompt <text> | --stdin | --notfound <cmd> | --explain <context> | --describe <cmd> | --teach <text> --command <cmd> | --list-taught | --delete-taught <text>) [--model <name>] [--endpoint <url>] [--bank <path>] [--samples <n>] [--temperature <f>] [--system <text>] [--history-file <path>] [--no-quality-retry]"
-            );
+            eprintln!("{}", usage_text());
             std::process::exit(1);
         }
     };
+
+    if args.help {
+        println!("{}", usage_text());
+        return;
+    }
 
     if args.stdin {
         use std::io::Read;

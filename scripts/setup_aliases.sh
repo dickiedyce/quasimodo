@@ -42,6 +42,10 @@ qd() { quasimodo --describe "$*" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr
 QE_BLOCK='# quasimodo: explain
 qe() { quasimodo --explain "$*" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"; }'
 
+# qh  -- help: show CLI usage
+QH_BLOCK='# quasimodo: help
+qh() { quasimodo --help; }'
+
 # qt  -- teach: store a corrected example
 #   usage: qt "description" "correct command"
 QT_BLOCK='# quasimodo: teach
@@ -51,6 +55,21 @@ qt() {
     return 1
   fi
   quasimodo --teach "$1" --command "$2" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"
+}'
+
+# qlt -- list-taught: show all taught examples
+QLT_BLOCK='# quasimodo: list taught
+qlt() { quasimodo --list-taught --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"; }'
+
+# qrm -- remove taught example by description substring
+#   usage: qrm "description substring"
+QRM_BLOCK='# quasimodo: delete taught
+qrm() {
+  if [ $# -lt 1 ]; then
+    echo "usage: qrm <description substring>" >&2
+    return 1
+  fi
+  quasimodo --delete-taught "$1" --bank "${QUASIMODO_BANK:-$HOME/.quasimodo/tldr_bank.db}"
 }'
 
 # qnf -- not-found: manually query the not-found resolver
@@ -72,7 +91,10 @@ qb() {
 maybe_add "# quasimodo: query"     "$QQ_BLOCK"  "qq  (query)"
 maybe_add "# quasimodo: describe"  "$QD_BLOCK"  "qd  (describe)"
 maybe_add "# quasimodo: explain"   "$QE_BLOCK"  "qe  (explain)"
+maybe_add "# quasimodo: help"      "$QH_BLOCK"  "qh  (help)"
 maybe_add "# quasimodo: teach"     "$QT_BLOCK"  "qt  (teach)"
+maybe_add "# quasimodo: list taught" "$QLT_BLOCK" "qlt (list taught)"
+maybe_add "# quasimodo: delete taught" "$QRM_BLOCK" "qrm (delete taught)"
 maybe_add "# quasimodo: not-found" "$QNF_BLOCK" "qnf (not-found lookup)"
 maybe_add "# quasimodo: build"     "$QB_BLOCK"  "qb  (build bank)"
 

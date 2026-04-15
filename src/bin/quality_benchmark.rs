@@ -217,6 +217,7 @@ fn run_one(adapter: &OllamaAdapter, prompt: &str, bank_path: Option<String>, ret
         teach_description: None,
         teach_command: None,
         delete_taught: None,
+        help: false,
         describe: false,
         list_taught: false,
     };

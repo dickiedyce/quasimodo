@@ -57,6 +57,9 @@ cargo run --bin build-bank -- "$HOME/.quasimodo/tldr_bank.db"
 # Command generation from plain English
 cargo run -- --prompt "find files changed in the last hour" --bank "$HOME/.quasimodo/tldr_bank.db"
 
+# Show CLI help
+cargo run -- --help
+
 # Command-not-found helper mode
 cargo run -- --notfound ip --bank "$HOME/.quasimodo/tldr_bank.db"
 
@@ -176,6 +179,18 @@ This enables:
 1. `Ctrl+]` (or your configured key) rewrites natural language in your shell buffer into a command.
 2. `command_not_found_handler` suggestions via `--notfound`.
 3. `TRAPZERR` one-line explanations via `--explain`.
+
+If you use `./scripts/setup_aliases.sh`, it also installs these shell shortcuts:
+
+- `qq` for `--prompt`
+- `qd` for `--describe`
+- `qe` for `--explain`
+- `qh` for `--help`
+- `qt` for `--teach`
+- `qlt` for `--list-taught`
+- `qrm` for `--delete-taught`
+- `qnf` for `--notfound`
+- `qb` for `build-bank`
 
 To disable error trapping/explanations while keeping other hooks enabled:
 
