@@ -847,9 +847,13 @@ fn retry_guidance(prompt: &str) -> &'static str {
 }
 
 fn format_taught_entries(entries: &[bank::BankEntry]) -> String {
+    if entries.is_empty() {
+        return "no taught examples stored".to_string();
+    }
+
     entries
         .iter()
-        .map(|entry| format!("{}\t{}", entry.description, entry.command))
+        .map(|entry| format!("\"{}\" => {}", entry.description, entry.command))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1573,7 +1577,37 @@ This should return the address.
         .unwrap();
 
         let result = run(&args, &EchoAdapter).unwrap();
-        assert_eq!(result, "list files\tls -la\nshow date\tdate");
+        assert_eq!(result, "\"list files\" => ls -la\n\"show date\" => date");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_taught_via_cli_returns_helpful_empty_message() {
+        use crate::bank::Bank;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("quasimodo-list-taught-empty-{now}.db"));
+        let db_path = path.to_string_lossy().to_string();
+
+        let _bank = Bank::open(&db_path).unwrap();
+
+        let args = CliArgs::parse(
+            vec![
+                "--list-taught".to_string(),
+                "--bank".to_string(),
+                db_path.clone(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        let result = run(&args, &EchoAdapter).unwrap();
+        assert_eq!(result, "no taught examples stored");
 
         let _ = std::fs::remove_file(path);
     }

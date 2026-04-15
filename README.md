@@ -109,7 +109,14 @@ To inspect all stored user-taught examples:
 quasimodo --list-taught --bank "$HOME/.quasimodo/tldr_bank.db"
 ```
 
-Output format is one tab-separated line per entry: `<description><TAB><command>`.
+Displayed output is human-readable, one mapping per line:
+
+```text
+"find files changed in the last hour" => find . -mmin -60
+"what is the date in 3 weeks" => date -v +3w '+%Y-%m-%d'
+```
+
+If nothing has been taught yet, the command prints `no taught examples stored`.
 
 To remove a stored user-taught example, pass a description substring. The first matching entry in description order is deleted:
 
